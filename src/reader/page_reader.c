@@ -1044,12 +1044,15 @@ carquet_status_t carquet_read_data_page_v1(
         carquet_dispatch_fill_def_levels(def_levels, num_values, reader->max_def_level);
     }
 
-    /* Count non-null values */
+    /* Count non-null values once for the whole page; carquet_read_next_page and
+     * the column reader reuse reader->page_non_null_count instead of re-counting
+     * the same definition levels on every read. */
     int32_t non_null_count = num_values;
     if (def_levels && reader->max_def_level > 0) {
         non_null_count = (int32_t)carquet_dispatch_count_non_nulls(
             def_levels, num_values, reader->max_def_level);
     }
+    reader->page_non_null_count = non_null_count;
 
     /* Decode values based on encoding */
     carquet_status_t status = CARQUET_OK;
@@ -1416,12 +1419,15 @@ carquet_status_t carquet_read_data_page_v2(
      * must decompress only the data portion while leaving levels uncompressed.
      * By the time we get here, ptr points to uncompressed data. */
 
-    /* Count non-null values */
+    /* Count non-null values once for the whole page; carquet_read_next_page and
+     * the column reader reuse reader->page_non_null_count instead of re-counting
+     * the same definition levels on every read. */
     int32_t non_null_count = num_values;
     if (def_levels && reader->max_def_level > 0) {
         non_null_count = (int32_t)carquet_dispatch_count_non_nulls(
             def_levels, num_values, reader->max_def_level);
     }
+    reader->page_non_null_count = non_null_count;
 
     /* Decode values based on encoding - reuse V1 value decoding logic */
     carquet_status_t status = CARQUET_OK;
@@ -2597,7 +2603,14 @@ carquet_status_t carquet_column_ensure_page_loaded(
             reader->page_loaded = false;
         }
 
-        return load_next_page(reader, error);
+        carquet_status_t status = load_next_page(reader, error);
+        if (status == CARQUET_OK) {
+            /* A freshly loaded page resets page_values_read to 0, so the dense
+             * read cursor restarts too. This is the single choke point for
+             * fresh loads (read and skip both route through here). */
+            reader->page_dense_values_read = 0;
+        }
+        return status;
     }
 
     return CARQUET_OK;
@@ -2832,14 +2845,21 @@ carquet_status_t carquet_read_next_page(
     int32_t values_to_copy = to_copy;
 
     if (reader->decoded_def_levels && reader->max_def_level > 0) {
-        int32_t dense_start = count_present_levels(
-            reader->decoded_def_levels,
-            reader->page_values_read,
-            reader->max_def_level);
-        values_to_copy = count_present_levels(
-            reader->decoded_def_levels + reader->page_values_read,
-            to_copy,
-            reader->max_def_level);
+        /* dense_start is tracked incrementally in page_dense_values_read rather
+         * than rescanning [0, page_values_read) on every call, which made
+         * consuming one page in K batches O(N^2/K) in the page's value count. */
+        int32_t dense_start = reader->page_dense_values_read;
+        if (to_copy == available) {
+            /* Consuming the remainder of the page: its present count is already
+             * known from the once-per-page total, so skip re-scanning the def
+             * levels entirely (this is the common whole-page read). */
+            values_to_copy = reader->page_non_null_count - dense_start;
+        } else {
+            values_to_copy = count_present_levels(
+                reader->decoded_def_levels + reader->page_values_read,
+                to_copy,
+                reader->max_def_level);
+        }
         offset = (size_t)dense_start * value_size;
     }
 
@@ -2863,8 +2883,12 @@ carquet_status_t carquet_read_next_page(
         }
     }
 
-    /* Update state */
+    /* Update state. values_to_copy is the present-value count of this range
+     * (== to_copy for non-nullable columns), so it advances the dense cursor and
+     * is published for the column reader to reuse instead of re-counting. */
     reader->page_values_read += to_copy;
+    reader->page_dense_values_read += values_to_copy;
+    reader->last_dense_read = values_to_copy;
     reader->values_remaining -= to_copy;
     *values_read = to_copy;
 
@@ -2913,6 +2937,13 @@ int64_t carquet_column_skip(
             int64_t want = num_values - total_skipped;
             int64_t n = avail < want ? avail : want;
             if (n > reader->values_remaining) n = reader->values_remaining;
+            if (reader->decoded_def_levels && reader->max_def_level > 0) {
+                /* Dropping n logical values consumes their present values too;
+                 * advance the dense cursor before page_values_read moves. */
+                reader->page_dense_values_read += count_present_levels(
+                    reader->decoded_def_levels + reader->page_values_read,
+                    (int32_t)n, reader->max_def_level);
+            }
             reader->page_values_read += (int32_t)n;
             reader->values_remaining -= n;
             total_skipped += n;
