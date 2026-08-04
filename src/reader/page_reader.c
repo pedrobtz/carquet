@@ -1717,6 +1717,14 @@ static carquet_status_t prepare_data_page_payload(
  * ============================================================================
  */
 
+/* qio patch: some writers (parquet-mr among them) emit a dictionary page as the
+ * first page of a chunk but declare only data_page_offset, leaving
+ * dictionary_page_offset unset. Reading that page as a data page fails with
+ * "Expected data page", which is how datapage_v2.snappy.parquet from the Apache
+ * corpus became unreadable while Arrow reads it fine. When no dictionary offset
+ * is declared, look at data_page_offset instead and treat the page as a
+ * dictionary only if it really is one; the existing recomputation of
+ * data_start_offset then steps the reader past it. */
 static carquet_status_t load_dictionary_page_mmap(
     carquet_column_reader_t* reader,
     carquet_error_t* error) {
@@ -1726,7 +1734,9 @@ static carquet_status_t load_dictionary_page_mmap(
     const parquet_column_metadata_t* col_meta = reader->col_meta;
 
     /* Parse page header directly from mmap */
-    int64_t dict_offset = col_meta->dictionary_page_offset;
+    int64_t dict_offset = col_meta->has_dictionary_page_offset
+                              ? col_meta->dictionary_page_offset
+                              : col_meta->data_page_offset;
     if (dict_offset < 0 || (size_t)dict_offset >= file_reader->file_size) {
         CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_PAGE, "Dictionary page offset out of range");
         return CARQUET_ERROR_INVALID_PAGE;
@@ -1746,6 +1756,10 @@ static carquet_status_t load_dictionary_page_mmap(
     }
 
     if (page_header.type != CARQUET_PAGE_DICTIONARY) {
+        if (!col_meta->has_dictionary_page_offset) {
+            /* Probing an undeclared dictionary; this chunk simply has none. */
+            return CARQUET_OK;
+        }
         CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_PAGE, "Expected dictionary page");
         return CARQUET_ERROR_INVALID_PAGE;
     }
@@ -1902,7 +1916,9 @@ static carquet_status_t load_dictionary_page_fread(
 
     carquet_reader_t* file_reader = reader->file_reader;
     const parquet_column_metadata_t* col_meta = reader->col_meta;
-    int64_t dict_offset = col_meta->dictionary_page_offset;
+    int64_t dict_offset = col_meta->has_dictionary_page_offset
+                              ? col_meta->dictionary_page_offset
+                              : col_meta->data_page_offset;
 
     /* Read page header (from prebuffer cache or file) */
     parquet_page_header_t page_header;
@@ -1914,6 +1930,10 @@ static carquet_status_t load_dictionary_page_fread(
     }
 
     if (page_header.type != CARQUET_PAGE_DICTIONARY) {
+        if (!col_meta->has_dictionary_page_offset) {
+            /* Probing an undeclared dictionary; this chunk simply has none. */
+            return CARQUET_OK;
+        }
         CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_PAGE, "Expected dictionary page");
         return CARQUET_ERROR_INVALID_PAGE;
     }
@@ -2001,8 +2021,10 @@ static carquet_status_t load_dictionary_page_fread(
      * after the dictionary page: dict_offset + header + compressed data. */
     if (status == CARQUET_OK) {
         int64_t data_start;
-        if (!checked_add_i64(col_meta->dictionary_page_offset,
-                             (int64_t)header_size, &data_start) ||
+        /* qio patch: from the offset the dictionary was actually read at, not
+         * col_meta->dictionary_page_offset, which is 0 when the writer omitted
+         * it and the page was found via data_page_offset. */
+        if (!checked_add_i64(dict_offset, (int64_t)header_size, &data_start) ||
             !checked_add_i64(data_start, (int64_t)page_header.compressed_page_size,
                              &data_start)) {
             CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_PAGE, "Dictionary page offset overflow");
@@ -2036,7 +2058,9 @@ static carquet_status_t load_next_page_mmap(
     const parquet_column_metadata_t* col_meta = reader->col_meta;
 
     /* Load dictionary if needed (may update data_start_offset) */
-    if (col_meta->has_dictionary_page_offset && !reader->has_dictionary) {
+    if (!reader->has_dictionary && reader->current_page == 0 &&
+        (col_meta->has_dictionary_page_offset ||
+         col_meta->data_page_offset > 0)) {
         carquet_status_t status = load_dictionary_page_mmap(reader, error);
         if (status != CARQUET_OK) {
             return status;
@@ -2266,7 +2290,9 @@ static carquet_status_t load_next_page_fread(
     const parquet_column_metadata_t* col_meta = reader->col_meta;
 
     /* Load dictionary if needed (may update data_start_offset) */
-    if (col_meta->has_dictionary_page_offset && !reader->has_dictionary) {
+    if (!reader->has_dictionary && reader->current_page == 0 &&
+        (col_meta->has_dictionary_page_offset ||
+         col_meta->data_page_offset > 0)) {
         carquet_status_t status = load_dictionary_page_fread(reader, error);
         if (status != CARQUET_OK) {
             return status;
