@@ -180,39 +180,34 @@ void carquet_bitunpack8_32(const uint8_t* input, int bit_width, uint32_t* values
         case 8: carquet_bitunpack8_8bit(input, values); return;
     }
 
-    /* General case for 9-32 bits */
-    /* Use 64-bit shift to avoid UB when bit_width=32 */
+    /* General case for 9-32 bits.
+     *
+     * Widths 1-8 and 16 have specialized or SIMD kernels above; everything
+     * else lands here, which covers every dictionary with more than 256
+     * entries. The previous version extracted each value with an inner loop
+     * that took one byte at a time and did two `% 8` operations per byte.
+     *
+     * Instead, keep a 64-bit accumulator holding the bits not yet consumed and
+     * refill it a byte at a time only when it runs short. Each value is then
+     * one mask and one shift. The accumulator holds at most bit_width - 1 + 8
+     * = 39 bits, so it never overflows.
+     *
+     * Values are little-endian bit-packed, least significant bit first, which
+     * is why refills shift in at the top and consumption takes from the
+     * bottom. */
     uint32_t mask = (uint32_t)((1ULL << bit_width) - 1);
-    int bit_pos = 0;
+    uint64_t accumulator = 0;
+    int bits_held = 0;
     int byte_pos = 0;
 
     for (int i = 0; i < 8; i++) {
-        /* Read enough bytes to cover the value */
-        uint64_t bits = 0;
-        int bits_needed = bit_width;
-        int bits_in_buffer = 0;
-
-        while (bits_needed > 0) {
-            int bits_from_byte = 8 - (bit_pos % 8);
-            if (bits_from_byte > bits_needed) {
-                bits_from_byte = bits_needed;
-            }
-
-            uint8_t byte_val = input[byte_pos];
-            int shift_down = bit_pos % 8;
-            uint64_t extracted = (byte_val >> shift_down) & ((1U << bits_from_byte) - 1);
-            bits |= extracted << bits_in_buffer;
-
-            bit_pos += bits_from_byte;
-            bits_in_buffer += bits_from_byte;
-            bits_needed -= bits_from_byte;
-
-            if (bit_pos % 8 == 0) {
-                byte_pos++;
-            }
+        while (bits_held < bit_width) {
+            accumulator |= (uint64_t)input[byte_pos++] << bits_held;
+            bits_held += 8;
         }
-
-        values[i] = (uint32_t)(bits & mask);
+        values[i] = (uint32_t)(accumulator & mask);
+        accumulator >>= bit_width;
+        bits_held -= bit_width;
     }
 }
 
