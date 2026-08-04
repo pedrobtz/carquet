@@ -664,7 +664,15 @@ static carquet_status_t eval_clause_to_ranges(
         int64_t end_row;
         if (i + 1 < n_pages) {
             carquet_page_location_t next;
-            (void)carquet_offset_index_get_page_location(oi, i + 1, &next);
+            st = carquet_offset_index_get_page_location(oi, i + 1, &next);
+            if (st != CARQUET_OK) {
+                carquet_column_index_free(ci);
+                carquet_offset_index_free(oi);
+                CARQUET_SET_ERROR(error, st,
+                    "Could not read page %d from offset index for column %d",
+                    i + 1, clause->column_index);
+                return st;
+            }
             end_row = next.first_row_index;
         } else {
             end_row = row_group_num_rows;

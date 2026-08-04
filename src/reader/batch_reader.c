@@ -435,7 +435,10 @@ static void read_projected_column(
         /* Trigger page load to check if it's a zero-copy page */
         int64_t dummy_read = carquet_column_read_batch(
             col_reader, NULL, 0, NULL, NULL);
-        (void)dummy_read;
+        if (dummy_read < 0) {
+            *read_error = true;
+            return;
+        }
     }
 
     bool use_zero_copy = !use_dict_preserve &&
@@ -1756,9 +1759,16 @@ static carquet_status_t position_projected_column(
             return CARQUET_ERROR_INTERNAL;
         }
         carquet_page_location_t loc;
-        (void)carquet_offset_index_get_page_location(oi, page_idx, &loc);
+        carquet_status_t st = carquet_offset_index_get_page_location(
+            oi, page_idx, &loc);
+        if (st != CARQUET_OK) {
+            CARQUET_SET_ERROR(error, st,
+                "Could not read page %d from offset index for column %d",
+                page_idx, file_col);
+            return st;
+        }
 
-        carquet_status_t st = carquet_column_reader_seek_to_data_page(
+        st = carquet_column_reader_seek_to_data_page(
             cr, loc.offset, 0, error);
         if (st != CARQUET_OK) return st;
 
@@ -2230,6 +2240,7 @@ carquet_status_t carquet_batch_reader_next(
      * are columns needing decompression (uncompressed pages are trivial). */
     bool is_mmap = (batch_reader->reader->mmap_data != NULL);
     bool needs_decompression = false;
+    int preload_error = 0;
     for (int32_t pi = 0; pi < batch_reader->num_projected; pi++) {
         carquet_column_reader_t* cr = batch_reader->col_readers[pi];
         if (cr && cr->col_meta &&
@@ -2247,11 +2258,13 @@ carquet_status_t carquet_batch_reader_next(
         if (num_threads < 1) num_threads = 1;
 
         int32_t omp_i;
-        #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1) if(is_mmap && needs_decompression && num_threads > 1)
+        #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1) if(is_mmap && needs_decompression && num_threads > 1) reduction(|:preload_error)
         for (omp_i = 0; omp_i < batch_reader->num_projected; omp_i++) {
             carquet_column_reader_t* col_reader = batch_reader->col_readers[omp_i];
             if (col_reader && !col_reader->page_loaded && col_reader->values_remaining > 0) {
-                (void)carquet_column_read_batch(col_reader, NULL, 0, NULL, NULL);
+                int64_t preload_result = carquet_column_read_batch(
+                    col_reader, NULL, 0, NULL, NULL);
+                if (preload_result < 0) preload_error = 1;
             }
         }
     }
@@ -2259,10 +2272,16 @@ carquet_status_t carquet_batch_reader_next(
     for (int32_t pi = 0; pi < batch_reader->num_projected; pi++) {
         carquet_column_reader_t* col_reader = batch_reader->col_readers[pi];
         if (col_reader && !col_reader->page_loaded && col_reader->values_remaining > 0) {
-            (void)carquet_column_read_batch(col_reader, NULL, 0, NULL, NULL);
+            int64_t preload_result = carquet_column_read_batch(
+                col_reader, NULL, 0, NULL, NULL);
+            if (preload_result < 0) preload_error = 1;
         }
     }
 #endif
+
+    if (preload_error) {
+        return CARQUET_ERROR_DECODE;
+    }
 
     /* If every projected column is backed by a direct page view, trim the
      * batch to the smallest currently available page slice. This avoids

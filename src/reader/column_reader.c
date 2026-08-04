@@ -54,7 +54,9 @@ int64_t carquet_column_read_batch(
         if (reader->values_remaining > 0 && !reader->page_loaded) {
             carquet_error_t error = CARQUET_ERROR_INIT;
             carquet_status_t status = carquet_column_ensure_page_loaded(reader, &error);
-            (void)status;
+            if (status != CARQUET_OK) {
+                return -1;
+            }
         }
         return 0;
     }
