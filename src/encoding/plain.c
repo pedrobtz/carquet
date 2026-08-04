@@ -234,15 +234,20 @@ carquet_status_t carquet_encode_plain_boolean(
     }
 
     size_t bytes_needed = ((size_t)count + 7) / 8;
+    /* qio patch: a page with no present values needs no bytes. Requesting a
+     * zero-size advance returns NULL, which was reported as out of memory, so
+     * writing an all-null BOOLEAN column failed. The guard below already
+     * anticipated a zero count. */
+    if (bytes_needed == 0) {
+        return CARQUET_OK;
+    }
     uint8_t* dest = carquet_buffer_advance(output, bytes_needed);
     if (!dest) {
         return CARQUET_ERROR_OUT_OF_MEMORY;
     }
 
-    if (bytes_needed > 0) {
-        memset(dest, 0, bytes_needed);
-        carquet_dispatch_pack_bools(input, dest, count);
-    }
+    memset(dest, 0, bytes_needed);
+    carquet_dispatch_pack_bools(input, dest, count);
 
     return CARQUET_OK;
 }
