@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <inttypes.h>
 
 #if defined(CARQUET_ARCH_ARM) && defined(CARQUET_ENABLE_NEON) && \
     (defined(__ARM_NEON) || defined(__ARM_NEON__))
@@ -942,6 +943,81 @@ static carquet_status_t decode_phase3_values(
                         "BYTE_STREAM_SPLIT unsupported type");
                     return CARQUET_ERROR_INVALID_ENCODING;
             }
+
+        case CARQUET_ENCODING_RLE:
+            /* RLE is a data encoding only for BOOLEAN; every other type uses it
+             * for levels and dictionary indices, which are decoded elsewhere.
+             *
+             * The payload is a 4-byte little-endian byte count followed by the
+             * RLE/bit-packed hybrid run stream at bit width 1. The prefix is
+             * present in DATA_PAGE and DATA_PAGE_V2 alike: only the *level*
+             * sections drop it in V2, because the V2 header already carries
+             * their lengths. */
+            if (reader->type != CARQUET_PHYSICAL_BOOLEAN) {
+                CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_ENCODING,
+                    "RLE data pages are defined only for BOOLEAN");
+                return CARQUET_ERROR_INVALID_ENCODING;
+            }
+            /* The destination is sized for uint32_t indices in
+             * dictionary-preserving mode, so one byte per value would be
+             * misread downstream. Reject rather than return silent nonsense,
+             * as the PLAIN fallback above does. */
+            if (reader->preserve_dictionary) {
+                CARQUET_SET_ERROR(error, CARQUET_ERROR_INVALID_ENCODING,
+                    "Cannot preserve dictionary: column chunk falls back to RLE "
+                    "encoding mid-chunk (mixed encodings)");
+                return CARQUET_ERROR_INVALID_ENCODING;
+            }
+            if (non_null_count <= 0) {
+                return CARQUET_OK;
+            }
+            if (remaining < 4) {
+                CARQUET_SET_ERROR(error, CARQUET_ERROR_DECODE,
+                    "RLE boolean page is missing its length prefix");
+                return CARQUET_ERROR_DECODE;
+            }
+            {
+                uint32_t rle_bytes = carquet_read_u32_le(ptr);
+                if ((size_t)rle_bytes > remaining - 4) {
+                    /* %zu is not supported by MinGW's C runtime; see the
+                     * portable-format patch in .agents/VENDORED.md. */
+                    CARQUET_SET_ERROR(error, CARQUET_ERROR_DECODE,
+                        "RLE boolean length %u exceeds the %" PRIuMAX
+                        " byte payload",
+                        rle_bytes, (uintmax_t)(remaining - 4));
+                    return CARQUET_ERROR_DECODE;
+                }
+
+                /* Decode in fixed slices so a page needs no allocation: the
+                 * hybrid decoder emits uint32_t and BOOLEAN output is one byte
+                 * per value. */
+                carquet_rle_decoder_t dec;
+                carquet_rle_decoder_init(&dec, ptr + 4, (size_t)rle_bytes, 1);
+
+                uint32_t slice[512];
+                const int64_t slice_len = (int64_t)(sizeof(slice) / sizeof(slice[0]));
+                uint8_t* out = (uint8_t*)values;
+                int32_t done = 0;
+
+                while (done < non_null_count) {
+                    int64_t want = (int64_t)non_null_count - done;
+                    if (want > slice_len) {
+                        want = slice_len;
+                    }
+                    int64_t got = carquet_rle_decoder_get_batch(&dec, slice, want);
+                    if (got != want) {
+                        CARQUET_SET_ERROR(error, CARQUET_ERROR_DECODE,
+                            "RLE boolean page ended after %d of %d values",
+                            done + (got > 0 ? (int)got : 0), non_null_count);
+                        return CARQUET_ERROR_DECODE;
+                    }
+                    for (int64_t i = 0; i < got; i++) {
+                        out[done + i] = (uint8_t)(slice[i] != 0);
+                    }
+                    done += (int32_t)got;
+                }
+            }
+            return CARQUET_OK;
 
         default:
             *handled = false;
