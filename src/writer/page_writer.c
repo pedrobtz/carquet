@@ -124,6 +124,7 @@ typedef struct carquet_page_writer {
     int64_t num_rows;        /* Logical rows (rep_level==0); used by V2 only */
 
     bool data_page_v2;       /* Emit DATA_PAGE_V2 instead of DATA_PAGE */
+    bool bss_applied;        /* qio patch: page already byte-split at finalize */
 
     int32_t compression_level;   /* 0 = use codec default */
 
@@ -284,6 +285,7 @@ void carquet_page_writer_destroy(carquet_page_writer_t* writer) {
 
 void carquet_page_writer_reset(carquet_page_writer_t* writer) {
     carquet_buffer_clear(&writer->values_buffer);
+    writer->bss_applied = false;
     carquet_buffer_clear(&writer->def_levels_buffer);
     carquet_buffer_clear(&writer->rep_levels_buffer);
     carquet_buffer_clear(&writer->staging_buffer);
@@ -849,23 +851,12 @@ static carquet_status_t encode_float_values(
         return CARQUET_OK;
     }
 
-    if (writer->encoding == CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
-        size_t bytes_needed = (size_t)count * sizeof(float);
-        size_t offset = writer->values_buffer.size;
-        uint8_t* dest = carquet_buffer_advance(&writer->values_buffer, bytes_needed);
-        size_t bytes_written = 0;
-        if (!dest) {
-            return CARQUET_ERROR_OUT_OF_MEMORY;
-        }
-        carquet_status_t status = carquet_byte_stream_split_encode_float(
-            values, count, dest, bytes_needed, &bytes_written);
-        if (status != CARQUET_OK || bytes_written != bytes_needed) {
-            writer->values_buffer.size = offset;
-            return status != CARQUET_OK ? status : CARQUET_ERROR_ENCODE;
-        }
-        return CARQUET_OK;
-    }
-
+    /* qio patch: BYTE_STREAM_SPLIT transposes a whole page into byte planes,
+     * so it cannot be applied incrementally. This used to split each call's
+     * subrange and append, which produced independently transposed regions
+     * that the decoder de-split as one stride, corrupting every value in any
+     * page built from more than one call. Raw values accumulate here and
+     * apply_byte_stream_split() transposes the page once, at finalize. */
     return carquet_encode_plain_float(values, count, &writer->values_buffer);
 }
 
@@ -878,23 +869,7 @@ static carquet_status_t encode_double_values(
         return CARQUET_OK;
     }
 
-    if (writer->encoding == CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
-        size_t bytes_needed = (size_t)count * sizeof(double);
-        size_t offset = writer->values_buffer.size;
-        uint8_t* dest = carquet_buffer_advance(&writer->values_buffer, bytes_needed);
-        size_t bytes_written = 0;
-        if (!dest) {
-            return CARQUET_ERROR_OUT_OF_MEMORY;
-        }
-        carquet_status_t status = carquet_byte_stream_split_encode_double(
-            values, count, dest, bytes_needed, &bytes_written);
-        if (status != CARQUET_OK || bytes_written != bytes_needed) {
-            writer->values_buffer.size = offset;
-            return status != CARQUET_OK ? status : CARQUET_ERROR_ENCODE;
-        }
-        return CARQUET_OK;
-    }
-
+    /* qio patch: see encode_float_values(). */
     return carquet_encode_plain_double(values, count, &writer->values_buffer);
 }
 
@@ -1696,6 +1671,42 @@ static carquet_status_t finalize_v2_to_buffer(
  * ============================================================================
  */
 
+/* qio patch: transpose the accumulated raw values into BYTE_STREAM_SPLIT byte
+ * planes, once, for the whole page. Byte-wise so it does not depend on the
+ * value buffer being aligned for float or double access. Idempotent within a
+ * page: finalize may be called more than once before the writer is reset. */
+static carquet_status_t apply_byte_stream_split(carquet_page_writer_t* writer) {
+    if (writer->encoding != CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
+        return CARQUET_OK;
+    }
+    if (writer->bss_applied || writer->values_buffer.size == 0) {
+        return CARQUET_OK;
+    }
+
+    size_t width = (writer->type == CARQUET_PHYSICAL_FLOAT) ? sizeof(float)
+                                                            : sizeof(double);
+    size_t size = writer->values_buffer.size;
+    if (size % width != 0) {
+        return CARQUET_ERROR_ENCODE;
+    }
+    size_t count = size / width;
+
+    uint8_t* planes = (uint8_t*)carquet_mem_malloc(size);
+    if (!planes) {
+        return CARQUET_ERROR_OUT_OF_MEMORY;
+    }
+    const uint8_t* src = writer->values_buffer.data;
+    for (size_t i = 0; i < count; i++) {
+        for (size_t b = 0; b < width; b++) {
+            planes[b * count + i] = src[i * width + b];
+        }
+    }
+    memcpy(writer->values_buffer.data, planes, size);
+    carquet_mem_free(planes);
+    writer->bss_applied = true;
+    return CARQUET_OK;
+}
+
 carquet_status_t carquet_page_writer_finalize(
     carquet_page_writer_t* writer,
     const uint8_t** page_data,
@@ -1727,6 +1738,11 @@ carquet_status_t carquet_page_writer_finalize_to_buffer(
 
     if (!writer || !output_buffer || !page_size) {
         return CARQUET_ERROR_INVALID_ARGUMENT;
+    }
+
+    carquet_status_t split_status = apply_byte_stream_split(writer);
+    if (split_status != CARQUET_OK) {
+        return split_status;
     }
 
     if (writer->data_page_v2) {
