@@ -169,6 +169,22 @@ struct carquet_column_reader {
     bool page_loaded;           /* Is a page currently loaded? */
     int32_t page_num_values;    /* Total values in current page */
     int32_t page_values_read;   /* Values already read from current page */
+    int32_t page_dense_values_read; /* Present (non-null) values already read
+                                     * from the current page: the dense offset
+                                     * into decoded_values. Maintained alongside
+                                     * page_values_read so partial-page reads do
+                                     * not rescan [0, page_values_read) each call
+                                     * (which made a page O(N^2) in its values). */
+    int32_t page_non_null_count;    /* Present values in the whole current page,
+                                     * counted once when the page is decoded so
+                                     * carquet_read_next_page and the column reader
+                                     * reuse it instead of re-counting the def
+                                     * levels on every read (nanoparquet counts
+                                     * a column's nulls exactly once). */
+    int32_t last_dense_read;        /* Present values produced by the most recent
+                                     * carquet_read_next_page call; lets the column
+                                     * reader advance its dense output cursor without
+                                     * recounting the batch's def levels. */
     int32_t page_header_size;   /* Size of current page header */
     int32_t page_compressed_size; /* Size of current page compressed data */
     uint8_t* decoded_values;    /* Buffer for decoded values from current page */

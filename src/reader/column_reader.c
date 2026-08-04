@@ -23,20 +23,11 @@ extern carquet_status_t carquet_read_next_page(
     int16_t* rep_levels,
     int64_t* values_read,
     carquet_error_t* error);
-extern int64_t carquet_dispatch_count_non_nulls(const int16_t* def_levels, int64_t count,
-                                                 int16_t max_def_level);
 
 /* ============================================================================
  * Batch Reading
  * ============================================================================
  */
-
-static int64_t count_present_levels(
-    const int16_t* def_levels,
-    int64_t count,
-    int16_t max_def_level) {
-    return carquet_dispatch_count_non_nulls(def_levels, count, max_def_level);
-}
 
 int64_t carquet_column_read_batch(
     carquet_column_reader_t* reader,
@@ -137,8 +128,9 @@ int64_t carquet_column_read_batch(
         }
 
         if (nullable && def_ptr) {
-            dense_values_read += count_present_levels(
-                def_ptr, values_read, reader->max_def_level);
+            /* carquet_read_next_page already counted this batch's present values
+             * (reader->last_dense_read); reuse it rather than re-scanning def_ptr. */
+            dense_values_read += reader->last_dense_read;
         } else {
             dense_values_read += values_read;
         }
