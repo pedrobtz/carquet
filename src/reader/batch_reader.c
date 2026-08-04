@@ -502,10 +502,17 @@ static void read_projected_column(
                          !use_dict_preserve;
 
     if (try_zero_copy) {
-        /* Trigger page load to check if it's a zero-copy page */
-        int64_t dummy_read = carquet_column_read_batch(
-            col_reader, NULL, 0, NULL, NULL);
-        (void)dummy_read;
+        /* Trigger page load to check if it's a zero-copy page. A failure here
+         * is a real decode failure, not an empty read: the _ex variant reports
+         * it through the error while still returning 0, so the return value
+         * alone cannot tell the two apart. */
+        carquet_error_t probe_error = CARQUET_ERROR_INIT;
+        (void)carquet_column_read_batch_ex(
+            col_reader, NULL, 0, NULL, NULL, &probe_error);
+        if (probe_error.code != CARQUET_OK) {
+            *read_error = true;
+            return;
+        }
     }
 
     bool use_zero_copy = allow_zero_copy && !use_dict_preserve &&
@@ -1999,10 +2006,18 @@ static carquet_status_t position_projected_column(
             return CARQUET_ERROR_INTERNAL;
         }
         carquet_page_location_t loc;
-        (void)carquet_offset_index_get_page_location(oi, page_idx, &loc);
+        carquet_status_t st = carquet_offset_index_get_page_location(
+            oi, page_idx, &loc);
+        if (st != CARQUET_OK) {
+            /* Without this, loc stays uninitialised and the seek below jumps
+             * to an arbitrary file offset. */
+            CARQUET_SET_ERROR(error, st,
+                "Could not read page %d from the offset index for column %d",
+                page_idx, file_col);
+            return st;
+        }
 
-        carquet_status_t st = carquet_column_reader_seek_to_data_page(
-            cr, loc.offset, 0, error);
+        st = carquet_column_reader_seek_to_data_page(cr, loc.offset, 0, error);
         if (st != CARQUET_OK) return st;
 
         int64_t intra_skip = target_row - page_first_row;
@@ -2813,6 +2828,7 @@ carquet_status_t carquet_batch_reader_next(
      * are columns needing decompression (uncompressed pages are trivial). */
     bool is_mmap = (batch_reader->reader->mmap_data != NULL);
     bool needs_decompression = false;
+    int preload_error = 0;
     for (int32_t pi = 0; pi < batch_reader->num_projected; pi++) {
         carquet_column_reader_t* cr = batch_reader->col_readers[pi];
         if (cr && cr->col_meta &&
@@ -2830,11 +2846,15 @@ carquet_status_t carquet_batch_reader_next(
         if (num_threads < 1) num_threads = 1;
 
         int32_t omp_i;
-        #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1) if(is_mmap && needs_decompression && num_threads > 1)
+        /* The reduction carries a failure in any thread past the join. */
+        #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1) if(is_mmap && needs_decompression && num_threads > 1) reduction(|:preload_error)
         for (omp_i = 0; omp_i < batch_reader->num_projected; omp_i++) {
             carquet_column_reader_t* col_reader = batch_reader->col_readers[omp_i];
             if (col_reader && !col_reader->page_loaded && col_reader->values_remaining > 0) {
-                (void)carquet_column_read_batch(col_reader, NULL, 0, NULL, NULL);
+                carquet_error_t preload_err = CARQUET_ERROR_INIT;
+                (void)carquet_column_read_batch_ex(
+                    col_reader, NULL, 0, NULL, NULL, &preload_err);
+                if (preload_err.code != CARQUET_OK) preload_error = 1;
             }
         }
     }
@@ -2842,10 +2862,21 @@ carquet_status_t carquet_batch_reader_next(
     for (int32_t pi = 0; pi < batch_reader->num_projected; pi++) {
         carquet_column_reader_t* col_reader = batch_reader->col_readers[pi];
         if (col_reader && !col_reader->page_loaded && col_reader->values_remaining > 0) {
-            (void)carquet_column_read_batch(col_reader, NULL, 0, NULL, NULL);
+            carquet_error_t preload_err = CARQUET_ERROR_INIT;
+            (void)carquet_column_read_batch_ex(
+                col_reader, NULL, 0, NULL, NULL, &preload_err);
+            if (preload_err.code != CARQUET_OK) preload_error = 1;
         }
     }
 #endif
+
+    /* A page that failed to decode during preload would otherwise be reported
+     * as a successful batch holding whatever the buffers already contained. */
+    if (preload_error) {
+        CARQUET_SET_ERROR(&err, CARQUET_ERROR_DECODE,
+            "Failed to preload a column page for the next batch");
+        return CARQUET_ERROR_DECODE;
+    }
 
     /* If every projected column is backed by a direct page view, trim the
      * batch to the smallest currently available page slice. This avoids
