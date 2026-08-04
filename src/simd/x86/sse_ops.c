@@ -16,8 +16,10 @@
 #include <string.h>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-/* SSE4.2 is always available on x64 MSVC, check __SSE4_2__ for GCC/Clang */
-#if defined(__SSE4_2__) || defined(_M_X64) || defined(_M_IX86)
+/* MSVC exposes x86 intrinsics without feature macros. GCC and Clang, including
+ * MinGW, must advertise SSE4.2 explicitly or this unit remains empty. */
+#if defined(__SSE4_2__) || \
+    (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)))
 
 #ifdef _MSC_VER
 #include <intrin.h>
