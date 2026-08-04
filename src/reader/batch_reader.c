@@ -864,10 +864,15 @@ carquet_batch_reader_t* carquet_batch_reader_create(
 #else
                 if (pt <= 0) pt = 4;
 #endif
-                if (pt < 2) pt = 2;
-
-                batch_reader->pool = carquet_worker_pool_create(pt);
-                batch_reader->pool_is_borrowed = false;
+                /* qio patch: honor num_threads == 1 as "no workers". Upstream
+                 * raised any request below 2 up to 2, so a caller explicitly
+                 * asking for a serial read still got a worker thread. Leaving
+                 * the pool NULL keeps pipeline_active false, which is the same
+                 * serial path an uncompressed file already takes. */
+                if (pt >= 2) {
+                    batch_reader->pool = carquet_worker_pool_create(pt);
+                    batch_reader->pool_is_borrowed = false;
+                }
             }
 
             if (batch_reader->pool) {
