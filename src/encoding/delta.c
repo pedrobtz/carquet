@@ -22,9 +22,21 @@ extern void carquet_dispatch_prefix_sum_i64(int64_t* values, int64_t count, int6
  * ============================================================================
  */
 
+/* What this encoder writes. The format allows other shapes; these are the
+ * smallest legal ones and are what parquet-mr emits. */
 #define DELTA_BLOCK_SIZE      128
 #define DELTA_MINI_BLOCKS     4
 #define DELTA_MINI_BLOCK_SIZE (DELTA_BLOCK_SIZE / DELTA_MINI_BLOCKS)
+
+/* What this decoder accepts, which must be wider than what it writes. The
+ * format allows any block size that is a multiple of 128, and Apache Arrow
+ * writes 256 values per block for INT64 while writing 128 for INT32 -- so
+ * validating against the encoder's own shape rejected a legal file, and only
+ * for 64-bit columns. The buffers below are sized for the worst case these
+ * bounds permit: one mini-block holding a whole block. */
+#define DELTA_MAX_BLOCK_SIZE      1024
+#define DELTA_MAX_MINI_BLOCKS     32
+#define DELTA_MAX_MINI_BLOCK_SIZE DELTA_MAX_BLOCK_SIZE
 
 /* ============================================================================
  * Delta Decoder State
@@ -46,12 +58,12 @@ typedef struct {
 
     /* Current block state */
     int64_t min_delta;
-    uint8_t bit_widths[DELTA_MINI_BLOCKS];
+    uint8_t bit_widths[DELTA_MAX_MINI_BLOCKS];
     int32_t current_mini_block;
     int32_t values_in_mini_block;
 
     /* Mini-block buffer */
-    int64_t mini_block_values[DELTA_MINI_BLOCK_SIZE];
+    int64_t mini_block_values[DELTA_MAX_MINI_BLOCK_SIZE];
     int32_t mini_block_pos;
 } delta_decoder_t;
 
@@ -109,14 +121,15 @@ static carquet_status_t delta_decoder_init(delta_decoder_t* dec,
     dec->pos += bytes;
 
     /* Validate header values to prevent buffer overflows */
-    if (dec->mini_blocks_per_block <= 0 || dec->mini_blocks_per_block > DELTA_MINI_BLOCKS) {
+    if (dec->mini_blocks_per_block <= 0 ||
+        dec->mini_blocks_per_block > DELTA_MAX_MINI_BLOCKS) {
         return CARQUET_ERROR_DECODE;
     }
-    if (dec->block_size <= 0 || dec->block_size > DELTA_BLOCK_SIZE) {
+    if (dec->block_size <= 0 || dec->block_size > DELTA_MAX_BLOCK_SIZE) {
         return CARQUET_ERROR_DECODE;
     }
     /* mini_block_size = block_size / mini_blocks_per_block must fit in buffer */
-    if (dec->block_size / dec->mini_blocks_per_block > DELTA_MINI_BLOCK_SIZE) {
+    if (dec->block_size / dec->mini_blocks_per_block > DELTA_MAX_MINI_BLOCK_SIZE) {
         return CARQUET_ERROR_DECODE;
     }
 
@@ -134,7 +147,7 @@ static carquet_status_t delta_decoder_init(delta_decoder_t* dec,
 
     dec->last_value = dec->first_value;
     dec->current_mini_block = dec->mini_blocks_per_block; /* Force block read */
-    dec->mini_block_pos = DELTA_MINI_BLOCK_SIZE; /* Force mini-block read */
+    dec->mini_block_pos = DELTA_MAX_MINI_BLOCK_SIZE; /* Force mini-block read */
 
     return CARQUET_OK;
 }
@@ -183,7 +196,7 @@ static carquet_status_t delta_decoder_read_mini_block(delta_decoder_t* dec) {
             return CARQUET_ERROR_DECODE;
         }
 
-        uint32_t unpacked[DELTA_MINI_BLOCK_SIZE];
+        uint32_t unpacked[DELTA_MAX_MINI_BLOCK_SIZE];
         carquet_bitunpack_32(dec->data + dec->pos, mini_block_size, bit_width, unpacked);
 
         for (int i = 0; i < mini_block_size; i++) {
