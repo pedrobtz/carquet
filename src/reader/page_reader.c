@@ -332,6 +332,16 @@ static carquet_status_t validate_page_payload_span(
     return CARQUET_OK;
 }
 
+/* Bit-unpacking and RLE decoders can read a few words past the logical end of
+ * the payload to fill the final group of values. The decompress buffer is
+ * realloc'd (not zeroed), so that over-read would land on uninitialised heap:
+ * benign where the OS hands back zeroed pages (macOS), undefined on glibc (x86).
+ * Over-allocate this much slack past the payload and zero it so the over-read is
+ * defined. This is defensive: the x86 corruption that prompted the
+ * investigation traced to the scalar Snappy overlapping-copy bug rather than
+ * to this over-read, so the slack is a cheap guard, not a fix. */
+#define CARQUET_DECODE_SLACK 64
+
 static carquet_status_t ensure_decompress_capacity(
     carquet_column_reader_t* reader,
     size_t needed,
@@ -343,15 +353,23 @@ static carquet_status_t ensure_decompress_capacity(
         return CARQUET_ERROR_INVALID_PAGE;
     }
 
-    if (needed > reader->decompress_capacity) {
-        uint8_t* new_buf = carquet_mem_realloc(reader->decompress_buffer, needed);
+    size_t want = needed + CARQUET_DECODE_SLACK;
+    if (want > reader->decompress_capacity) {
+        uint8_t* new_buf = carquet_mem_realloc(reader->decompress_buffer, want);
         if (!new_buf) {
             CARQUET_SET_ERROR(error, CARQUET_ERROR_OUT_OF_MEMORY, "%s", message);
             return CARQUET_ERROR_OUT_OF_MEMORY;
         }
         reader->decompress_buffer = new_buf;
-        reader->decompress_capacity = needed;
+        reader->decompress_capacity = want;
     }
+
+    /* Zero only the slack past the payload, not the whole buffer. The subsequent
+     * decompress writes the full [0, needed) payload, so the only bytes a decoder
+     * can read while still undefined are the [needed, needed+slack) group
+     * over-read region — zeroing those 64 bytes keeps that defined without paying
+     * a whole-buffer memset on every page (this is the read hot path). */
+    memset(reader->decompress_buffer + needed, 0, CARQUET_DECODE_SLACK);
 
     return CARQUET_OK;
 }
