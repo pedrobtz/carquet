@@ -26,12 +26,20 @@
  *   POSIX (any)      -> pthread_key_create with destructors.  Works for both
  *                        OpenMP threads and worker pool pthreads.  The pthread
  *                        runtime calls the destructor when each thread exits.
- *   Windows + OpenMP -> __declspec(thread) with explicit carquet_zstd_cleanup.
- *   Windows no OMP   -> plain global statics with explicit carquet_zstd_cleanup.
+ *   Windows (any)    -> thread-local storage with explicit
+ *                        carquet_zstd_cleanup, called by each worker thread as
+ *                        it exits (see reader/worker_pool.c).
+ *
+ * The Windows case must not depend on OpenMP.  It once fell back to plain
+ * global statics when _OPENMP was undefined, on the assumption that without
+ * OpenMP there was only one thread -- but carquet's own worker pool creates
+ * threads on Windows whether or not OpenMP is configured, so two of them could
+ * decompress through one shared ZSTD_DCtx at the same time.  That is a data
+ * race, and it corrupted or crashed any multi-column zstd read.
  *
  * carquet_cleanup() (public API) calls carquet_zstd_cleanup() for the
  * calling thread.  On POSIX the worker-thread contexts are freed
- * automatically; on Windows callers must arrange per-thread cleanup.
+ * automatically; on Windows the worker pool frees its own.
  * ============================================================================ */
 
 #if !defined(_WIN32)
@@ -89,10 +97,16 @@ void carquet_zstd_cleanup(void) {
     }
 }
 
-#elif defined(_OPENMP)
-/* ---- Windows + OpenMP: __declspec(thread) with explicit cleanup ---- */
-static __declspec(thread) ZSTD_DCtx* tls_dctx = NULL;
-static __declspec(thread) ZSTD_CCtx* tls_cctx = NULL;
+#else
+/* ---- Windows: thread-local storage with explicit cleanup ---- */
+#if defined(_MSC_VER)
+#define CARQUET_ZSTD_TLS __declspec(thread)
+#else
+#define CARQUET_ZSTD_TLS __thread
+#endif
+
+static CARQUET_ZSTD_TLS ZSTD_DCtx* tls_dctx = NULL;
+static CARQUET_ZSTD_TLS ZSTD_CCtx* tls_cctx = NULL;
 
 static ZSTD_DCtx* get_dctx(void) {
     if (!tls_dctx) tls_dctx = ZSTD_createDCtx();
@@ -109,25 +123,6 @@ void carquet_zstd_cleanup(void) {
     if (tls_cctx) { ZSTD_freeCCtx(tls_cctx); tls_cctx = NULL; }
 }
 
-#else
-/* ---- Windows no OpenMP: global contexts ---- */
-static ZSTD_DCtx* global_dctx = NULL;
-static ZSTD_CCtx* global_cctx = NULL;
-
-static ZSTD_DCtx* get_dctx(void) {
-    if (!global_dctx) global_dctx = ZSTD_createDCtx();
-    return global_dctx;
-}
-
-static ZSTD_CCtx* get_cctx(void) {
-    if (!global_cctx) global_cctx = ZSTD_createCCtx();
-    return global_cctx;
-}
-
-void carquet_zstd_cleanup(void) {
-    if (global_dctx) { ZSTD_freeDCtx(global_dctx); global_dctx = NULL; }
-    if (global_cctx) { ZSTD_freeCCtx(global_cctx); global_cctx = NULL; }
-}
 #endif
 
 int carquet_zstd_decompress(

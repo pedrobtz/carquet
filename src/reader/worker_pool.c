@@ -12,6 +12,10 @@
 #include "worker_pool.h"
 #include <stdlib.h>
 
+/* Declared here rather than pulled in from a compression header, which is how
+ * simd/detect.c reaches the same function. */
+extern void carquet_zstd_cleanup(void);
+
 /* ============================================================================
  * Platform Abstraction
  * ============================================================================ */
@@ -88,6 +92,14 @@ static void* worker_thread_func(void* arg) {
         }
         POOL_UNLOCK(pool);
     }
+
+    /* Release this thread's cached zstd contexts. They are per-thread so that
+     * workers never share one, which means nothing else will free them: on
+     * Windows the thread-local storage has no destructor, and a pool is
+     * created and destroyed per read, so without this each read would leak a
+     * context (~650KB) for every worker. On POSIX the pthread destructor would
+     * eventually run, and freeing here simply makes it a no-op. */
+    carquet_zstd_cleanup();
 
 #ifdef _WIN32
     return 0;
