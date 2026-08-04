@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <inttypes.h>
 
 /* External functions from metadata modules */
 extern carquet_status_t carquet_bloom_filter_read(carquet_bloom_filter_t** filter_out,
@@ -827,7 +828,8 @@ carquet_status_t carquet_reader_prebuffer(
     uint8_t* buf = carquet_mem_malloc(total_size);
     if (!buf) {
         CARQUET_SET_ERROR(error, CARQUET_ERROR_OUT_OF_MEMORY,
-            "Failed to allocate prebuffer (%zu bytes)", total_size);
+            "Failed to allocate prebuffer (%" PRIuMAX " bytes)",
+            (uintmax_t)total_size);
         return CARQUET_ERROR_OUT_OF_MEMORY;
     }
 
