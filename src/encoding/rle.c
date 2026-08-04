@@ -11,6 +11,13 @@
 /* SIMD dispatch for optimized level fill (AVX2/AVX-512/NEON/SVE) */
 extern void carquet_dispatch_fill_def_levels(int16_t* def_levels, int64_t count, int16_t value);
 
+/* Resolving the unpack kernel costs a lazy-init check, a bounds test and a
+ * table lookup. carquet_bitunpack8_32() does it on every call, which is once
+ * per eight values; the batch decoder below resolves it once per batch
+ * instead. NULL means this width has no specialized kernel, so the general
+ * function is called and does its own dispatch. */
+extern carquet_bitunpack8_fn carquet_dispatch_get_bitunpack8_fn(int bit_width);
+
 /* ============================================================================
  * Internal Helpers
  * ============================================================================
@@ -179,6 +186,11 @@ int64_t carquet_rle_decoder_get_batch(
 
     int64_t read = 0;
 
+    /* Resolved once for the whole batch rather than once per eight values. */
+    carquet_bitunpack8_fn unpack8 =
+        dec->bit_width > 0 ? carquet_dispatch_get_bitunpack8_fn(dec->bit_width)
+                           : NULL;
+
     while (read < count && carquet_rle_decoder_has_next(dec)) {
         /* Need new run? */
         if (dec->run_remaining <= 0) {
@@ -200,7 +212,43 @@ int64_t carquet_rle_decoder_get_batch(
             dec->run_remaining -= to_fill;
 
         } else {
-            /* Bit-packed run */
+            /* Bit-packed run.
+             *
+             * The 8-value staging buffer exists only because a caller may ask
+             * for a count that does not land on a group boundary. When it does
+             * -- the common case, since a batch is thousands of values -- whole
+             * groups can be unpacked straight into the caller's buffer, which
+             * removes a copy and a three-condition loop test per value. */
+
+            /* Drain the staging buffer first, or a previous call that stopped
+             * mid-group would have its leftovers emitted out of order. */
+            while (read < count && dec->bitpack_pos < dec->bitpack_count &&
+                   dec->run_remaining > 0) {
+                output[read++] = dec->bitpack_buffer[dec->bitpack_pos++];
+                dec->run_remaining--;
+            }
+
+            /* Whole groups, unpacked in place. */
+            while (count - read >= 8 && dec->run_remaining >= 8) {
+                size_t bytes_needed = (size_t)dec->bit_width;
+                if (dec->pos + bytes_needed > dec->size) {
+                    dec->status = CARQUET_ERROR_INVALID_RLE;
+                    break;
+                }
+                if (unpack8 != NULL) {
+                    unpack8(dec->data + dec->pos, output + read);
+                } else {
+                    carquet_bitunpack8_32(dec->data + dec->pos, dec->bit_width,
+                                          output + read);
+                }
+                dec->pos += bytes_needed;
+                read += 8;
+                dec->run_remaining -= 8;
+            }
+
+            /* Whatever is left: fewer than 8 wanted, or fewer than 8 in the
+             * run. These still go through the staging buffer, which is what
+             * carries a partial group across calls. */
             while (read < count && dec->run_remaining > 0) {
                 if (dec->bitpack_pos >= dec->bitpack_count) {
                     if (!fill_bitpack_buffer(dec)) {
@@ -208,7 +256,6 @@ int64_t carquet_rle_decoder_get_batch(
                     }
                 }
 
-                /* Copy from buffer */
                 while (read < count && dec->bitpack_pos < dec->bitpack_count &&
                        dec->run_remaining > 0) {
                     output[read++] = dec->bitpack_buffer[dec->bitpack_pos++];
