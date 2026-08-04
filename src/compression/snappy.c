@@ -307,11 +307,17 @@ static inline uint8_t* incremental_copy(const uint8_t* src, uint8_t* op,
                                          uint8_t* const buf_limit) {
     size_t pattern_size = (size_t)(op - src);
 
-#if SNAPPY_HAVE_VECTOR_SHUFFLE
+    /* The "simple block copies" path below fills the pattern with 16-byte
+       copy128s, which read 16 bytes from src == op - pattern_size. That only
+       stays within already-written output when pattern_size >= 16; for a
+       pattern_size in [8, 16) the second half of each 16-byte read lands on the
+       not-yet-written destination and corrupts the output. So the threshold for
+       entering the short-pattern fill (which uses 8-byte copy64s / a SIMD
+       reshuffle) must be 16 for BOTH the SIMD and the scalar paths. The scalar
+       path previously used 8 here, letting patterns of size 8..15 reach the
+       16-byte block copy — silently wrong on any build without NEON/SSSE3
+       (e.g. default-flags x86-64, where snappy falls back to scalar). */
     const int big_pattern = 16;
-#else
-    const int big_pattern = 8;
-#endif
 
     if (pattern_size < (size_t)big_pattern) {
 #if SNAPPY_HAVE_VECTOR_SHUFFLE
