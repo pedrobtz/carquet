@@ -1555,6 +1555,74 @@ int64_t carquet_column_skip(
     int64_t num_values);
 
 /**
+ * @brief Preserve dictionary encoding on a standalone column reader.
+ *
+ * The batch reader exposes this through carquet_batch_reader_config_t's
+ * preserve_dictionaries flag; this is the equivalent for a column reader
+ * obtained from carquet_reader_get_column(). When enabled,
+ * carquet_column_read_batch() writes uint32_t dictionary indices instead of
+ * materialized values, and the dictionary itself is read with
+ * carquet_column_get_dictionary().
+ *
+ * Call this before the first read on the reader. The value buffer handed to
+ * carquet_column_read_batch() must then be sized for uint32_t values, not for
+ * the column's physical type.
+ *
+ * A column chunk may mix encodings: a dictionary page followed by PLAIN or
+ * RLE data pages is rare but legal, and Apache Arrow does write it. Preserve
+ * mode cannot represent such a page, so carquet_column_read_batch() fails with
+ * -1 when it reaches one. Callers must be able to re-read the chunk with a
+ * fresh, non-preserving column reader.
+ *
+ * @param[in] reader Column reader
+ * @param[in] preserve true to keep indices, false to materialize values
+ * @return CARQUET_OK, or CARQUET_ERROR_INVALID_ARGUMENT for a NULL reader
+ *
+ * @note Thread-safe: No
+ */
+CARQUET_API CARQUET_NONNULL(1)
+carquet_status_t carquet_column_set_preserve_dictionary(
+    carquet_column_reader_t* reader,
+    bool preserve);
+
+/**
+ * @brief Get the dictionary backing a preserved column reader.
+ *
+ * Valid only after a page has been loaded, which a zero-length
+ * carquet_column_read_batch() call is enough to trigger. The returned pointers
+ * belong to the column reader and are invalidated when it advances to another
+ * column chunk or is freed.
+ *
+ * For BYTE_ARRAY columns each dictionary entry is length-prefixed, so entry i
+ * is located with the offset table:
+ * @code{.c}
+ * const uint8_t* entry = dictionary_data + dictionary_offsets[i];
+ * uint32_t length;
+ * memcpy(&length, entry, sizeof(length));   // little-endian
+ * const uint8_t* value = entry + 4;
+ * @endcode
+ *
+ * @param[in] reader Column reader
+ * @param[out] dictionary_data Raw dictionary bytes
+ * @param[out] dictionary_size Size of the dictionary buffer in bytes. Callers
+ *             must bounds-check every entry against it: the offset table and
+ *             the length prefixes come from the file, so a malformed or
+ *             unexpected dictionary would otherwise be read out of bounds.
+ * @param[out] dictionary_count Number of dictionary entries
+ * @param[out] dictionary_offsets Offset table, or NULL for fixed-width types
+ * @return true when a dictionary is loaded, false otherwise
+ *
+ * @note Thread-safe: No
+ */
+CARQUET_API CARQUET_NONNULL(1, 2, 3, 4, 5)
+bool carquet_column_get_dictionary(
+    const carquet_column_reader_t* reader,
+    const uint8_t** dictionary_data,
+    size_t* dictionary_size,
+    int32_t* dictionary_count,
+    const uint32_t** dictionary_offsets);
+
+/**
  * @brief Check if there are more values to read.
  *
  * @param[in] reader Column reader

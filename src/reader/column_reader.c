@@ -149,6 +149,49 @@ int64_t carquet_column_read_batch(
     return total_read;
 }
 
+/* ============================================================================
+ * Dictionary preservation on a standalone column reader
+ * ============================================================================
+ *
+ * The batch reader reaches these fields through its own config; a column
+ * reader obtained from carquet_reader_get_column() had no way to. Both
+ * functions only expose state the reader already maintains.
+ */
+
+carquet_status_t carquet_column_set_preserve_dictionary(
+    carquet_column_reader_t* reader,
+    bool preserve) {
+
+    if (!reader) {
+        return CARQUET_ERROR_INVALID_ARGUMENT;
+    }
+    /* decoded_value_size records the width the values buffer was allocated
+     * with, and carquet_column_ensure_page_loaded() reallocates when it no
+     * longer matches. Flipping this flag changes that width between
+     * sizeof(uint32_t) and the physical type's, so no buffer reset is needed
+     * here. */
+    reader->preserve_dictionary = preserve;
+    return CARQUET_OK;
+}
+
+bool carquet_column_get_dictionary(
+    const carquet_column_reader_t* reader,
+    const uint8_t** dictionary_data,
+    size_t* dictionary_size,
+    int32_t* dictionary_count,
+    const uint32_t** dictionary_offsets) {
+
+    if (!reader || !reader->has_dictionary || reader->dictionary_data == NULL) {
+        return false;
+    }
+    *dictionary_data = reader->dictionary_data;
+    *dictionary_size = reader->dictionary_size;
+    *dictionary_count = reader->dictionary_count;
+    /* NULL for fixed-width physical types, which need no offset table. */
+    *dictionary_offsets = reader->dictionary_offsets;
+    return true;
+}
+
 /* carquet_column_skip lives in page_reader.c: skipping is a page-state
  * operation that advances whole pages by parsing only their headers (no
  * decompression/decoding), so it belongs with the page-loading machinery. */
