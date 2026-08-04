@@ -821,6 +821,22 @@ static carquet_status_t decode_phase3_values(
     *needs_page_retain = false;
     size_t consumed = 0;
 
+    /* Dictionary-preserving mode sizes the value buffer for uint32_t indices,
+     * but every encoding below writes materialized physical values into it --
+     * carquet_byte_array_t is four times wider than a uint32_t, and INT64 and
+     * DOUBLE are twice. None of them is a dictionary encoding, so reaching
+     * here at all means the page cannot be preserved. Refuse rather than
+     * decode: without this a DELTA_BYTE_ARRAY or BYTE_STREAM_SPLIT page
+     * overruns the buffer and corrupts the heap. The caller re-reads the
+     * chunk with preservation off. PLAIN and RLE data pages are already
+     * refused at their own call sites. */
+    if (reader->preserve_dictionary) {
+        CARQUET_SET_ERROR(error, CARQUET_ERROR_DECODE,
+            "Cannot preserve dictionary: column chunk uses a non-dictionary "
+            "data page encoding");
+        return CARQUET_ERROR_DECODE;
+    }
+
     switch (encoding) {
         case CARQUET_ENCODING_DELTA_BINARY_PACKED:
             if (reader->type == CARQUET_PHYSICAL_INT32) {
