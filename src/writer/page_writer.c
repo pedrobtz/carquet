@@ -47,25 +47,9 @@ extern int carquet_zstd_compress(const uint8_t* src, size_t src_size,
                                   size_t* dst_size, int level);
 extern size_t carquet_zstd_compress_bound(size_t src_size);
 
-extern carquet_status_t carquet_byte_stream_split_encode_float(
-    const float* values,
-    int64_t count,
-    uint8_t* output,
-    size_t output_capacity,
-    size_t* bytes_written);
-extern carquet_status_t carquet_byte_stream_split_encode_double(
-    const double* values,
-    int64_t count,
-    uint8_t* output,
-    size_t output_capacity,
-    size_t* bytes_written);
-extern carquet_status_t carquet_byte_stream_split_encode(
-    const uint8_t* values,
-    int64_t count,
-    int32_t type_length,
-    uint8_t* output,
-    size_t output_capacity,
-    size_t* bytes_written);
+/* The incremental BYTE_STREAM_SPLIT encoders in encoding/byte_stream_split.c
+ * are no longer called from here: the transposition is applied to the finished
+ * page by apply_byte_stream_split() below. */
 extern carquet_status_t carquet_delta_encode_int32(
     const int32_t* values, int32_t num_values,
     uint8_t* data, size_t data_capacity, size_t* bytes_written);
@@ -935,18 +919,9 @@ static carquet_status_t encode_int32_values(
     size_t offset = writer->values_buffer.size;
 
     if (writer->encoding == CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
-        size_t need = (size_t)count * sizeof(int32_t);
-        uint8_t* dest = carquet_buffer_advance(&writer->values_buffer, need);
-        if (!dest) return CARQUET_ERROR_OUT_OF_MEMORY;
-        size_t written = 0;
-        carquet_status_t s = carquet_byte_stream_split_encode(
-            (const uint8_t*)values, count, (int32_t)sizeof(int32_t),
-            dest, need, &written);
-        if (s != CARQUET_OK || written != need) {
-            writer->values_buffer.size = offset;
-            return s != CARQUET_OK ? s : CARQUET_ERROR_ENCODE;
-        }
-        return CARQUET_OK;
+        /* Accumulate raw values; apply_byte_stream_split() transposes the page
+         * once, at finalize. See encode_float_values(). */
+        return carquet_encode_plain_int32(values, count, &writer->values_buffer);
     }
 
     if (writer->encoding == CARQUET_ENCODING_DELTA_BINARY_PACKED) {
@@ -978,18 +953,9 @@ static carquet_status_t encode_int64_values(
     size_t offset = writer->values_buffer.size;
 
     if (writer->encoding == CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
-        size_t need = (size_t)count * sizeof(int64_t);
-        uint8_t* dest = carquet_buffer_advance(&writer->values_buffer, need);
-        if (!dest) return CARQUET_ERROR_OUT_OF_MEMORY;
-        size_t written = 0;
-        carquet_status_t s = carquet_byte_stream_split_encode(
-            (const uint8_t*)values, count, (int32_t)sizeof(int64_t),
-            dest, need, &written);
-        if (s != CARQUET_OK || written != need) {
-            writer->values_buffer.size = offset;
-            return s != CARQUET_OK ? s : CARQUET_ERROR_ENCODE;
-        }
-        return CARQUET_OK;
+        /* Accumulate raw values; apply_byte_stream_split() transposes the page
+         * once, at finalize. See encode_float_values(). */
+        return carquet_encode_plain_int64(values, count, &writer->values_buffer);
     }
 
     if (writer->encoding == CARQUET_ENCODING_DELTA_BINARY_PACKED) {
@@ -1203,21 +1169,11 @@ carquet_status_t carquet_page_writer_add_values(
         case CARQUET_PHYSICAL_FIXED_LEN_BYTE_ARRAY: {
             const uint8_t* fixed = (const uint8_t*)values;
             if (writer->encoding == CARQUET_ENCODING_BYTE_STREAM_SPLIT) {
-                size_t need = (size_t)num_non_null * (size_t)writer->type_length;
-                size_t off = writer->values_buffer.size;
-                uint8_t* dest = carquet_buffer_advance(&writer->values_buffer, need);
-                if (!dest) {
-                    status = CARQUET_ERROR_OUT_OF_MEMORY;
-                } else {
-                    size_t written = 0;
-                    status = carquet_byte_stream_split_encode(
-                        fixed, num_non_null, writer->type_length,
-                        dest, need, &written);
-                    if (status != CARQUET_OK || written != need) {
-                        writer->values_buffer.size = off;
-                        if (status == CARQUET_OK) status = CARQUET_ERROR_ENCODE;
-                    }
-                }
+                /* Accumulate raw values; apply_byte_stream_split() transposes
+                 * the page once, at finalize. See encode_float_values(). */
+                status = carquet_encode_plain_fixed_byte_array(
+                    fixed, num_non_null, writer->type_length,
+                    &writer->values_buffer);
             } else if (writer->encoding == CARQUET_ENCODING_DELTA_BYTE_ARRAY) {
                 /* Spec allows DELTA_BYTE_ARRAY for FLBA: present each
                  * fixed-width value as a byte array of length type_length. */
@@ -1729,8 +1685,23 @@ static carquet_status_t apply_byte_stream_split(carquet_page_writer_t* writer) {
         return CARQUET_OK;
     }
 
-    size_t width = (writer->type == CARQUET_PHYSICAL_FLOAT) ? sizeof(float)
-                                                            : sizeof(double);
+    size_t width;
+    switch (writer->type) {
+        case CARQUET_PHYSICAL_FLOAT:  width = sizeof(float);   break;
+        case CARQUET_PHYSICAL_DOUBLE: width = sizeof(double);  break;
+        case CARQUET_PHYSICAL_INT32:  width = sizeof(int32_t); break;
+        case CARQUET_PHYSICAL_INT64:  width = sizeof(int64_t); break;
+        case CARQUET_PHYSICAL_FIXED_LEN_BYTE_ARRAY:
+            if (writer->type_length <= 0) {
+                return CARQUET_ERROR_ENCODE;
+            }
+            width = (size_t)writer->type_length;
+            break;
+        default:
+            /* BYTE_STREAM_SPLIT is not defined for the remaining physical
+             * types, and the encoding selector never chooses it for them. */
+            return CARQUET_ERROR_ENCODE;
+    }
     size_t size = writer->values_buffer.size;
     if (size % width != 0) {
         return CARQUET_ERROR_ENCODE;
