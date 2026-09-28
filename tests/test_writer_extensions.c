@@ -925,6 +925,73 @@ static int test_file_format_version(void) {
     return 0;
 }
 
+/* ---- Dictionary-encoded BYTE_ARRAY with empty values ---- */
+/* Writes `n` strings through RLE_DICTIONARY and reads them back. A dictionary
+ * of empty strings stores no bytes, which once left the dictionary's byte
+ * storage unallocated: the writer then offset a NULL base and passed NULL to
+ * memcmp/memcpy while encoding and computing min/max -- undefined behavior that
+ * UBSan reports even though the output was correct, so this test is meant to be
+ * run under it. Min/max are not asserted: the reader reports them only when
+ * both are non-empty, and an empty string is always the minimum here. */
+static int dict_empty_roundtrip(const char* name, const char* const* in,
+                                int n) {
+    char path[512]; carquet_test_temp_path(path, sizeof(path), name);
+    carquet_error_t err = CARQUET_ERROR_INIT;
+
+    carquet_byte_array_t vals[8];
+    if (n > 8) TEST_FAIL(name, "too many values");
+    for (int i = 0; i < n; i++) {
+        vals[i].data = (uint8_t*)(uintptr_t)in[i];
+        vals[i].length = (int32_t)strlen(in[i]);
+    }
+
+    carquet_schema_t* s = carquet_schema_create(&err);
+    if (!s) TEST_FAIL(name, "schema create");
+    carquet_logical_type_t str_lt = { .id = CARQUET_LOGICAL_STRING };
+    if (carquet_schema_add_column(s, "v", CARQUET_PHYSICAL_BYTE_ARRAY, &str_lt,
+            CARQUET_REPETITION_REQUIRED, 0, 0) != CARQUET_OK)
+        { carquet_schema_free(s); TEST_FAIL(name, "add col"); }
+
+    carquet_writer_options_t wo; carquet_writer_options_init(&wo);
+    carquet_writer_t* w = carquet_writer_create(path, s, &wo, &err);
+    if (!w) { carquet_schema_free(s); TEST_FAIL(name, "writer create"); }
+    if (carquet_writer_set_column_encoding(w, 0,
+            CARQUET_ENCODING_RLE_DICTIONARY) != CARQUET_OK ||
+        carquet_writer_write_batch(w, 0, vals, n, NULL, NULL) != CARQUET_OK)
+        { carquet_writer_close(w); carquet_schema_free(s);
+          carquet_test_cleanup(path); TEST_FAIL(name, "write"); }
+    if (carquet_writer_close(w) != CARQUET_OK)
+        { carquet_schema_free(s); carquet_test_cleanup(path);
+          TEST_FAIL(name, "close"); }
+    carquet_schema_free(s);
+
+    carquet_reader_t* r = carquet_reader_open(path, NULL, &err);
+    if (!r) { carquet_test_cleanup(path); TEST_FAIL(name, "open"); }
+    carquet_column_reader_t* c = carquet_reader_get_column(r, 0, 0, &err);
+    carquet_byte_array_t out[8];
+    int64_t got = c ? carquet_column_read_batch(c, out, n, NULL, NULL) : -1;
+    int ok = got == n;
+    for (int i = 0; ok && i < n; i++) {
+        ok = out[i].length == vals[i].length &&
+             (out[i].length == 0 ||
+              memcmp(out[i].data, in[i], (size_t)out[i].length) == 0);
+    }
+    carquet_column_reader_free(c); carquet_reader_close(r);
+    carquet_test_cleanup(path);
+    if (!ok) TEST_FAIL(name, "value mismatch");
+    TEST_PASS(name);
+    return 0;
+}
+
+static int test_dictionary_empty_strings(void) {
+    static const char* const all_empty[] = { "", "", "" };
+    static const char* const mixed[] = { "", "b", "", "a", "b" };
+    int failures = 0;
+    failures += dict_empty_roundtrip("dict_all_empty", all_empty, 3);
+    failures += dict_empty_roundtrip("dict_mixed_empty", mixed, 5);
+    return failures;
+}
+
 int main(void) {
     int failures = 0;
     failures += test_int96_roundtrip();
@@ -942,6 +1009,7 @@ int main(void) {
     failures += test_column_page_size_override();
     failures += test_max_statistics_size();
     failures += test_append_row_groups();
+    failures += test_dictionary_empty_strings();
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll writer-extension tests passed\n");
     return 0;

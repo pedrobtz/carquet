@@ -529,7 +529,9 @@ static int compare_stat_values(carquet_physical_type_t type,
     }
     /* BYTE_ARRAY / FLBA / mismatched sizes: lexicographic unsigned compare. */
     size_t n = alen < blen ? alen : blen;
-    int c = memcmp(a, b, n);
+    /* An empty value may have a NULL pointer, which memcmp may not be given
+     * even with a zero length. */
+    int c = n > 0 ? memcmp(a, b, n) : 0;
     if (c != 0) return c;
     if (alen < blen) return -1;
     if (alen > blen) return 1;
@@ -790,6 +792,15 @@ static carquet_status_t dict_accumulate(
             if (!p) return CARQUET_ERROR_OUT_OF_MEMORY;
             writer->dict_ba = p;
             writer->dict_ba_capacity = nc;
+        }
+        /* An empty value appends no bytes, so a dictionary of empty values
+         * would leave the storage unallocated and every offset below would
+         * later be applied to a NULL base. Allocate it before the first one;
+         * clearing the buffer between chunks keeps the allocation. */
+        if (!writer->dict_ba_storage.data) {
+            carquet_status_t s =
+                carquet_buffer_reserve(&writer->dict_ba_storage, 1);
+            if (s != CARQUET_OK) return s;
         }
         for (int64_t i = 0; i < num_non_null; i++) {
             /* Store offsets relative to dict_ba_storage; resolve to pointers

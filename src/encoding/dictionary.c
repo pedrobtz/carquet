@@ -229,7 +229,8 @@ static carquet_status_t dict_builder_add(dict_builder_t* builder,
     for (dict_entry_t* entry = builder->buckets[bucket]; entry; entry = entry->next) {
         if (entry->hash == hash &&
             entry->size == value_size &&
-            memcmp(entry->data, value, value_size) == 0) {
+            (value_size == 0 ||
+             memcmp(entry->data, value, value_size) == 0)) {
             /* Found existing entry */
             builder->indices[builder->indices_count++] = entry->index;
             return CARQUET_OK;
@@ -253,7 +254,10 @@ static carquet_status_t dict_builder_add(dict_builder_t* builder,
     }
 
     new_entry->data = (uint8_t*)(new_entry + 1);
-    memcpy(new_entry->data, value, value_size);
+    /* An empty value may arrive as NULL; memcpy may not be given one. */
+    if (value_size > 0) {
+        memcpy(new_entry->data, value, value_size);
+    }
     new_entry->size = value_size;
     new_entry->hash = hash;
     new_entry->index = (uint32_t)builder->count;
