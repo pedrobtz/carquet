@@ -127,7 +127,8 @@ static void parse_statistics(thrift_decoder_t* dec, carquet_arena_t* arena,
  * ============================================================================
  */
 
-static void parse_logical_type(thrift_decoder_t* dec, carquet_logical_type_t* lt) {
+static void parse_logical_type(thrift_decoder_t* dec, carquet_arena_t* arena,
+                               carquet_logical_type_t* lt) {
     memset(lt, 0, sizeof(*lt));
     thrift_read_struct_begin(dec);
 
@@ -264,6 +265,12 @@ static void parse_logical_type(thrift_decoder_t* dec, carquet_logical_type_t* lt
                                 ? (size_t)len : CARQUET_GEOSPATIAL_CRS_MAX - 1;
                             memcpy(lt->params.geometry.crs, data, n);
                             lt->params.geometry.crs[n] = '\0';
+                            /* A CRS that does not fit is kept whole rather
+                             * than cut: a truncated CRS is a different one. */
+                            if (n < (size_t)len && arena) {
+                                lt->params.geometry.crs_long = carquet_arena_strndup(
+                                    arena, (const char*)data, (size_t)len);
+                            }
                         }
                     } else {
                         thrift_skip(dec, type);
@@ -284,6 +291,12 @@ static void parse_logical_type(thrift_decoder_t* dec, carquet_logical_type_t* lt
                                 ? (size_t)len : CARQUET_GEOSPATIAL_CRS_MAX - 1;
                             memcpy(lt->params.geography.crs, data, n);
                             lt->params.geography.crs[n] = '\0';
+                            /* A CRS that does not fit is kept whole rather
+                             * than cut: a truncated CRS is a different one. */
+                            if (n < (size_t)len && arena) {
+                                lt->params.geography.crs_long = carquet_arena_strndup(
+                                    arena, (const char*)data, (size_t)len);
+                            }
                         }
                     } else if (field_id == 2) {
                         lt->params.geography.algorithm =
@@ -440,7 +453,7 @@ static void parse_schema_element(thrift_decoder_t* dec, carquet_arena_t* arena,
                 break;
             case 10:  /* logicalType */
                 elem->has_logical_type = true;
-                parse_logical_type(dec, &elem->logical_type);
+                parse_logical_type(dec, arena, &elem->logical_type);
                 break;
             default:
                 thrift_skip(dec, type);
@@ -1268,9 +1281,9 @@ static void write_logical_type(thrift_encoder_t* enc, const carquet_logical_type
         case CARQUET_LOGICAL_GEOMETRY:
             thrift_write_field_header(enc, THRIFT_TYPE_STRUCT, 17);
             thrift_write_struct_begin(enc);
-            if (lt->params.geometry.crs[0] != '\0') {
+            if (carquet_logical_type_crs(lt)[0] != '\0') {
                 thrift_write_field_header(enc, THRIFT_TYPE_BINARY, 1);
-                thrift_write_string(enc, lt->params.geometry.crs);
+                thrift_write_string(enc, carquet_logical_type_crs(lt));
             }
             thrift_write_struct_end(enc);
             break;
@@ -1278,9 +1291,9 @@ static void write_logical_type(thrift_encoder_t* enc, const carquet_logical_type
         case CARQUET_LOGICAL_GEOGRAPHY:
             thrift_write_field_header(enc, THRIFT_TYPE_STRUCT, 18);
             thrift_write_struct_begin(enc);
-            if (lt->params.geography.crs[0] != '\0') {
+            if (carquet_logical_type_crs(lt)[0] != '\0') {
                 thrift_write_field_header(enc, THRIFT_TYPE_BINARY, 1);
-                thrift_write_string(enc, lt->params.geography.crs);
+                thrift_write_string(enc, carquet_logical_type_crs(lt));
             }
             if (lt->params.geography.has_algorithm) {
                 thrift_write_field_header(enc, THRIFT_TYPE_I32, 2);

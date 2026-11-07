@@ -302,6 +302,13 @@ static int test_logical_type_converted_type_compat(void) {
     schema[18].type = CARQUET_PHYSICAL_BYTE_ARRAY;
     schema[18].has_logical_type = true;
     schema[18].logical_type.id = CARQUET_LOGICAL_GEOMETRY;
+    /* Longer than the inline buffer, as inline PROJJSON usually is. */
+    char long_crs[300];
+    memset(long_crs, 'x', sizeof(long_crs) - 1);
+    long_crs[0] = '{';
+    long_crs[sizeof(long_crs) - 2] = '}';
+    long_crs[sizeof(long_crs) - 1] = '\0';
+    schema[18].logical_type.params.geometry.crs_long = long_crs;
 
     schema[19].name = "geography";
     schema[19].has_type = true;
@@ -310,6 +317,7 @@ static int test_logical_type_converted_type_compat(void) {
     schema[19].logical_type.id = CARQUET_LOGICAL_GEOGRAPHY;
     schema[19].logical_type.params.geography.has_algorithm = true;
     schema[19].logical_type.params.geography.algorithm = CARQUET_GEOSPATIAL_EDGE_VINCENTY;
+    strcpy(schema[19].logical_type.params.geography.crs, "EPSG:4326");
 
     parquet_file_metadata_t metadata;
     memset(&metadata, 0, sizeof(metadata));
@@ -363,11 +371,14 @@ static int test_logical_type_converted_type_compat(void) {
     assert(parsed.schema[18].has_logical_type);
     assert(parsed.schema[18].logical_type.id == CARQUET_LOGICAL_GEOMETRY);
     assert(!parsed.schema[18].has_converted_type);
+    assert(strcmp(carquet_logical_type_crs(&parsed.schema[18].logical_type), long_crs) == 0);
     assert(parsed.schema[19].has_logical_type);
     assert(parsed.schema[19].logical_type.id == CARQUET_LOGICAL_GEOGRAPHY);
     assert(parsed.schema[19].logical_type.params.geography.has_algorithm);
     assert(parsed.schema[19].logical_type.params.geography.algorithm == CARQUET_GEOSPATIAL_EDGE_VINCENTY);
     assert(!parsed.schema[19].has_converted_type);
+    assert(parsed.schema[19].logical_type.params.geography.crs_long == NULL);
+    assert(strcmp(carquet_logical_type_crs(&parsed.schema[19].logical_type), "EPSG:4326") == 0);
     assert(parsed.num_column_orders == 18);
 
     carquet_arena_destroy(&arena);

@@ -152,16 +152,35 @@ typedef struct carquet_logical_type {
         /* For GEOMETRY */
         struct {
             char crs[CARQUET_GEOSPATIAL_CRS_MAX];  /* Optional, empty => OGC:CRS84 */
+            /* The whole CRS when a file's does not fit crs, which then holds
+             * only its first bytes; owned by the reader. Read the CRS
+             * through carquet_logical_type_crs(). */
+            const char* crs_long;
         } geometry;
 
         /* For GEOGRAPHY */
         struct {
             char crs[CARQUET_GEOSPATIAL_CRS_MAX];  /* Optional, empty => OGC:CRS84 */
+            const char* crs_long;                  /* As for GEOMETRY */
             carquet_geospatial_edge_algorithm_t algorithm;
             bool has_algorithm;                    /* false => SPHERICAL */
         } geography;
     } params;
 } carquet_logical_type_t;
+
+/* The CRS of a GEOMETRY or GEOGRAPHY logical type, however long; "" when
+ * absent (OGC:CRS84) and NULL for any other logical type. */
+static inline const char* carquet_logical_type_crs(const carquet_logical_type_t* lt) {
+    if (lt->id == CARQUET_LOGICAL_GEOMETRY) {
+        return lt->params.geometry.crs_long ? lt->params.geometry.crs_long
+                                            : lt->params.geometry.crs;
+    }
+    if (lt->id == CARQUET_LOGICAL_GEOGRAPHY) {
+        return lt->params.geography.crs_long ? lt->params.geography.crs_long
+                                             : lt->params.geography.crs;
+    }
+    return NULL;
+}
 
 /* ============================================================================
  * Field Repetition
