@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### API
+
+- `carquet_schema_set_geospatial_crs(schema, element_index, crs)` sets a GEOMETRY or GEOGRAPHY column's CRS at any length, replacing the one given in the logical type, whose fixed `crs` array holds at most 127 bytes: a CRS such as inline PROJJSON can now be written, not only carried over from a file read. The string is copied into the schema and written whole; the array keeps its first 127 bytes, as on read, and `carquet_schema_node_geospatial_crs()` returns it. `NULL` or `""` clears it (OGC:CRS84). ABI-compatible: no public struct changes. Tests: `geospatial_crs_setter` and `geospatial_crs_setter_errors` in `tests/test_writer_extensions.c`.
+
 ## v0.8.0
 
 **In short:** the Python package no longer depends on PyArrow: reads return `carquet.Table` (Arrow C Data arrays, PyCapsule interface) and the features PyArrow supplied (exact row filters, `ARROW:schema` restore and write, type handling on write) moved into the C library, where an `ArrowArrayStream` scan with row groups, row windows and DNF predicates serves C users too. Real-world files (nullable, dictionary-encoded and string columns, reads without mmap) are several times faster to read and write; 11 bugs that returned wrong results or wrote corrupt files without an error are fixed, plus 7 memory-safety fixes for crafted input and a compatibility pass against pyarrow, DuckDB, polars, fastparquet and apache/parquet-testing (`DECIMAL(p, 0)` readable everywhere, UTF-8 safe truncated statistics, legacy list layouts); zlib moves to 1.4. ABI: additions only (new functions and structs, `CARQUET_FILTER_NOT_IN` appended to the filter enum), but the Arrow export now types DECIMAL and INT96 as pyarrow does (see Breaking changes). Default output bytes change for dictionary chunks larger than one page (now cut into several pages) and in the cases listed under Performance; REQUIRED non-dictionary columns are written as before.

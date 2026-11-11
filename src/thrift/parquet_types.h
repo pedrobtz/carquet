@@ -101,7 +101,8 @@ struct parquet_schema_element {
     /* The whole CRS of a GEOMETRY / GEOGRAPHY logical type. The logical
      * type's fixed crs array keeps only its first
      * CARQUET_GEOSPATIAL_CRS_MAX - 1 bytes, and inline PROJJSON is usually
-     * longer. Set when the element is parsed from a file (arena-owned) and
+     * longer. Set when the element is parsed from a file or by
+     * carquet_schema_set_geospatial_crs() (arena-owned in both cases) and
      * written in preference to the array; NULL otherwise. Read it with
      * carquet_schema_node_geospatial_crs(). */
     const char* geospatial_crs;

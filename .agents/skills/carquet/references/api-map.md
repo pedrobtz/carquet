@@ -29,6 +29,7 @@ Every public function of `include/carquet/carquet.h` (v0.7.x), grouped by task. 
 | `carquet_schema_add_map_group` | `int32_t` | `carquet_schema_t* schema, const char* name, carquet_field_repetition_t map_repetition, int32_t parent_index` | Add a MAP container whose key/value are arbitrary nested subtrees. |
 | `carquet_schema_add_variant` | `int32_t` | `carquet_schema_t* schema, const char* name, carquet_field_repetition_t variant_repetition, int32_t parent_index` | Add an unshredded VARIANT group to the schema. |
 | `carquet_schema_set_field_metadata` | `carquet_status_t` | `carquet_schema_t* schema, int32_t element_index, const char* key, const char* value` | Attach Arrow-style per-field metadata (label, description) to a schema element; emitted with write_arrow_schema. |
+| `carquet_schema_set_geospatial_crs` | `carquet_status_t` | `carquet_schema_t* schema, int32_t element_index, const char* crs` | Set a GEOMETRY/GEOGRAPHY column's CRS at any length (the logical type's array holds 127 bytes); NULL or "" clears it. |
 
 ## Schema introspection
 
@@ -47,6 +48,7 @@ Every public function of `include/carquet/carquet.h` (v0.7.x), grouped by task. 
 | `carquet_schema_node_is_leaf` | `bool` | `const carquet_schema_node_t* node` | Check if a schema node is a leaf (column) or group. |
 | `carquet_schema_node_physical_type` | `carquet_physical_type_t` | `const carquet_schema_node_t* node` | Get the physical type of a leaf node. |
 | `carquet_schema_node_logical_type` | `const carquet_logical_type_t*` | `const carquet_schema_node_t* node` | Get the logical type annotation of a node. |
+| `carquet_schema_node_geospatial_crs` | `const char*` | `const carquet_schema_node_t* node` | Whole CRS of a GEOMETRY/GEOGRAPHY node ("" for none, NULL for other nodes). |
 | `carquet_schema_node_repetition` | `carquet_field_repetition_t` | `const carquet_schema_node_t* node` | Get the repetition level of a node. |
 | `carquet_schema_node_max_def_level` | `int16_t` | `const carquet_schema_node_t* node` | Get the maximum definition level for a column. |
 | `carquet_schema_node_max_rep_level` | `int16_t` | `const carquet_schema_node_t* node` | Get the maximum repetition level for a column. |

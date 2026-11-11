@@ -514,6 +514,52 @@ carquet_status_t carquet_schema_set_field_metadata(
     return CARQUET_OK;
 }
 
+carquet_status_t carquet_schema_set_geospatial_crs(
+    carquet_schema_t* schema,
+    int32_t element_index,
+    const char* crs) {
+
+    /* schema is nonnull per API contract */
+    if (element_index <= 0 || element_index >= schema->num_elements) {
+        return CARQUET_ERROR_INVALID_ARGUMENT;
+    }
+
+    parquet_schema_element_t* elem = &schema->elements[element_index];
+    if (!elem->has_logical_type) return CARQUET_ERROR_INVALID_ARGUMENT;
+
+    char* array;
+    switch (elem->logical_type.id) {
+        case CARQUET_LOGICAL_GEOMETRY:
+            array = elem->logical_type.params.geometry.crs;
+            break;
+        case CARQUET_LOGICAL_GEOGRAPHY:
+            array = elem->logical_type.params.geography.crs;
+            break;
+        default:
+            return CARQUET_ERROR_INVALID_ARGUMENT;
+    }
+
+    /* NULL or "": the type gives no CRS (OGC:CRS84). */
+    if (!crs || crs[0] == '\0') {
+        elem->geospatial_crs = NULL;
+        array[0] = '\0';
+        return CARQUET_OK;
+    }
+
+    /* The whole CRS lives in the schema arena and is what the writer writes;
+     * the array keeps its prefix, as it does for a CRS read from a file. */
+    char* copy = carquet_arena_strdup(&schema->arena, crs);
+    if (!copy) return CARQUET_ERROR_OUT_OF_MEMORY;
+    elem->geospatial_crs = copy;
+
+    size_t len = strlen(crs);
+    size_t n = len < CARQUET_GEOSPATIAL_CRS_MAX - 1
+        ? len : CARQUET_GEOSPATIAL_CRS_MAX - 1;
+    memcpy(array, crs, n);
+    array[n] = '\0';
+    return CARQUET_OK;
+}
+
 int32_t carquet_schema_num_columns(const carquet_schema_t* schema) {
     /* schema is nonnull per API contract */
     return schema->num_leaves;

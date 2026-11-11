@@ -49,6 +49,16 @@ int32_t payload_group = carquet_schema_add_variant(
     schema, "payload", CARQUET_REPETITION_OPTIONAL, 0);
 ```
 
+The logical type's `crs` array holds at most 127 bytes. For a longer CRS, such as inline PROJJSON, set it on the column after adding it; it is copied and written whole:
+
+```c
+carquet_schema_add_column(schema, "shape",
+    CARQUET_PHYSICAL_BYTE_ARRAY, &geometry_type,
+    CARQUET_REPETITION_OPTIONAL, 0, 0);
+carquet_schema_set_geospatial_crs(schema,
+    carquet_schema_num_elements(schema) - 1, projjson);
+```
+
 When a modern logical type has a legacy equivalent, the writer also emits the corresponding `ConvertedType` compatibility annotation automatically. Footer `column_orders` metadata is emitted automatically for written leaf columns.
 
 ## Create the Writer

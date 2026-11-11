@@ -804,6 +804,43 @@ carquet_status_t carquet_schema_set_field_metadata(
     const char* value);
 
 /**
+ * @brief Set the CRS of a GEOMETRY or GEOGRAPHY column, at any length.
+ *
+ * The logical type's @c crs array holds at most
+ * @c CARQUET_GEOSPATIAL_CRS_MAX - 1 bytes, too few for inline PROJJSON. A
+ * CRS set here is copied whole and written whole; it replaces the one given
+ * in the logical type when the column was added. The array keeps its first
+ * @c CARQUET_GEOSPATIAL_CRS_MAX - 1 bytes, and
+ * @ref carquet_schema_node_geospatial_crs returns the whole string.
+ *
+ * @param[in,out] schema        Target schema
+ * @param[in] element_index     Schema element index of a GEOMETRY or
+ *                              GEOGRAPHY column
+ *                              (`carquet_schema_num_elements() - 1` for the
+ *                              column just added).
+ * @param[in] crs               The CRS, copied. NULL or "" clears it: the
+ *                              column then gives none (OGC:CRS84).
+ * @return CARQUET_OK, CARQUET_ERROR_INVALID_ARGUMENT when the element is the
+ *         root, out of range or not GEOMETRY / GEOGRAPHY, or
+ *         CARQUET_ERROR_OUT_OF_MEMORY.
+ *
+ * @note Thread-safe: No (schema is mutable during construction)
+ *
+ * @code{.c}
+ * carquet_logical_type_t geometry_type = { .id = CARQUET_LOGICAL_GEOMETRY };
+ * carquet_schema_add_column(schema, "shape", CARQUET_PHYSICAL_BYTE_ARRAY,
+ *                           &geometry_type, CARQUET_REPETITION_OPTIONAL, 0, 0);
+ * carquet_schema_set_geospatial_crs(
+ *     schema, carquet_schema_num_elements(schema) - 1, projjson);
+ * @endcode
+ */
+CARQUET_API CARQUET_WARN_UNUSED_RESULT CARQUET_NONNULL(1)
+carquet_status_t carquet_schema_set_geospatial_crs(
+    carquet_schema_t* schema,
+    int32_t element_index,
+    const char* crs);
+
+/**
  * @brief Get the number of leaf columns in the schema.
  *
  * Returns the count of primitive columns (not including groups).

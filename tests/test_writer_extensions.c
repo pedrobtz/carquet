@@ -622,6 +622,125 @@ static int test_geospatial_stats(void) {
     return 0;
 }
 
+/* ---- CRS longer than the logical type's array ---- */
+static void fill_crs(char* buf, size_t size, char first) {
+    for (size_t i = 0; i + 1 < size; i++) buf[i] = (char)(first + (int)(i % 26));
+    buf[size - 1] = '\0';
+}
+
+static int crs_is(const carquet_schema_t* s, int32_t idx, const char* want) {
+    const char* got = carquet_schema_node_geospatial_crs(carquet_schema_get_element(s, idx));
+    return got && strcmp(got, want) == 0;
+}
+
+static int test_geospatial_crs_setter(void) {
+    const char* name = "geospatial_crs_setter";
+    char path[512]; carquet_test_temp_path(path, sizeof(path), "ext_geo_crs");
+    carquet_error_t err = CARQUET_ERROR_INIT;
+    static char geometry_crs[3000], geography_crs[300];
+    fill_crs(geometry_crs, sizeof(geometry_crs), 'a');
+    fill_crs(geography_crs, sizeof(geography_crs), 'A');
+
+    static uint8_t p0[21];
+    put_wkb_point(p0, 1.0, 2.0);
+    carquet_byte_array_t ba[1] = { { p0, 21 } };
+
+    /* g: a CRS in the array, replaced by a long one. h: GEOGRAPHY with an
+     * edge algorithm, which the setter keeps. k: a long CRS, then cleared. */
+    carquet_logical_type_t geo = { .id = CARQUET_LOGICAL_GEOMETRY };
+    memcpy(geo.params.geometry.crs, "OGC:CRS84", 10);
+    carquet_logical_type_t geog = {
+        .id = CARQUET_LOGICAL_GEOGRAPHY,
+        .params.geography = { .algorithm = CARQUET_GEOSPATIAL_EDGE_SPHERICAL,
+                              .has_algorithm = true },
+    };
+    carquet_schema_t* s = carquet_schema_create(&err);
+    int ok = s != NULL;
+    ok = ok && carquet_schema_add_column(s, "g", CARQUET_PHYSICAL_BYTE_ARRAY,
+            &geo, CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_set_geospatial_crs(s, 1, geometry_crs) == CARQUET_OK;
+    ok = ok && carquet_schema_add_column(s, "h", CARQUET_PHYSICAL_BYTE_ARRAY,
+            &geog, CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_set_geospatial_crs(s, 2, geography_crs) == CARQUET_OK;
+    ok = ok && carquet_schema_add_column(s, "k", CARQUET_PHYSICAL_BYTE_ARRAY,
+            &geo, CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_set_geospatial_crs(s, 3, geometry_crs) == CARQUET_OK;
+    ok = ok && carquet_schema_set_geospatial_crs(s, 3, NULL) == CARQUET_OK;
+    if (!ok) { if (s) carquet_schema_free(s); TEST_FAIL(name, "schema"); }
+
+    /* The built schema: whole CRS from the accessor, prefix in the array. */
+    const carquet_logical_type_t* lt =
+        carquet_schema_node_logical_type(carquet_schema_get_element(s, 1));
+    ok = crs_is(s, 1, geometry_crs) && crs_is(s, 2, geography_crs) &&
+         crs_is(s, 3, "") &&
+         strlen(lt->params.geometry.crs) == CARQUET_GEOSPATIAL_CRS_MAX - 1 &&
+         strncmp(lt->params.geometry.crs, geometry_crs,
+                 CARQUET_GEOSPATIAL_CRS_MAX - 1) == 0;
+    if (!ok) { carquet_schema_free(s); TEST_FAIL(name, "built schema"); }
+
+    /* The writer copies the CRS: the schema is freed before it writes. */
+    carquet_writer_options_t wo; carquet_writer_options_init(&wo);
+    carquet_writer_t* w = carquet_writer_create(path, s, &wo, &err);
+    carquet_schema_free(s);
+    if (!w) TEST_FAIL(name, "writer");
+    for (int c = 0; c < 3; c++) {
+        if (carquet_writer_write_batch(w, c, ba, 1, NULL, NULL) != CARQUET_OK) {
+            carquet_writer_abort(w);
+            carquet_test_cleanup(path);
+            TEST_FAIL(name, "write");
+        }
+    }
+    if (carquet_writer_close(w) != CARQUET_OK)
+        { carquet_test_cleanup(path); TEST_FAIL(name, "close"); }
+
+    carquet_reader_t* r = carquet_reader_open(path, NULL, &err);
+    if (!r) { carquet_test_cleanup(path); TEST_FAIL(name, "open"); }
+    const carquet_schema_t* rs = carquet_reader_schema(r);
+    const carquet_logical_type_t* rh =
+        carquet_schema_node_logical_type(carquet_schema_get_element(rs, 2));
+    ok = crs_is(rs, 1, geometry_crs) && crs_is(rs, 2, geography_crs) &&
+         crs_is(rs, 3, "") &&
+         rh && rh->params.geography.has_algorithm &&
+         rh->params.geography.algorithm == CARQUET_GEOSPATIAL_EDGE_SPHERICAL;
+    carquet_reader_close(r);
+    carquet_test_cleanup(path);
+    if (!ok) TEST_FAIL(name, "CRS not read back whole");
+    TEST_PASS(name);
+    return 0;
+}
+
+static int test_geospatial_crs_setter_errors(void) {
+    const char* name = "geospatial_crs_setter_errors";
+    carquet_error_t err = CARQUET_ERROR_INIT;
+    carquet_logical_type_t geo = { .id = CARQUET_LOGICAL_GEOMETRY };
+    carquet_logical_type_t str = { .id = CARQUET_LOGICAL_STRING };
+    carquet_schema_t* s = carquet_schema_create(&err);
+    int ok = s != NULL;
+    ok = ok && carquet_schema_add_column(s, "x", CARQUET_PHYSICAL_INT32, NULL,
+            CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_add_column(s, "s", CARQUET_PHYSICAL_BYTE_ARRAY, &str,
+            CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_add_column(s, "g", CARQUET_PHYSICAL_BYTE_ARRAY, &geo,
+            CARQUET_REPETITION_REQUIRED, 0, 0) == CARQUET_OK;
+    ok = ok && carquet_schema_add_group(s, "grp", CARQUET_REPETITION_OPTIONAL, 0) == 4;
+    if (!ok) { if (s) carquet_schema_free(s); TEST_FAIL(name, "schema"); }
+
+    const int32_t bad[] = { 0, -1, 5, 1, 2, 4 };  /* root, range, not geospatial */
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        ok = ok && carquet_schema_set_geospatial_crs(s, bad[i], "EPSG:4326")
+                   == CARQUET_ERROR_INVALID_ARGUMENT;
+    }
+    ok = ok && carquet_schema_node_geospatial_crs(carquet_schema_get_element(s, 2)) == NULL;
+    ok = ok && carquet_schema_set_geospatial_crs(s, 3, "EPSG:4326") == CARQUET_OK &&
+         crs_is(s, 3, "EPSG:4326");
+    ok = ok && carquet_schema_set_geospatial_crs(s, 3, "") == CARQUET_OK &&
+         crs_is(s, 3, "");
+    carquet_schema_free(s);
+    if (!ok) TEST_FAIL(name, "unexpected status");
+    TEST_PASS(name);
+    return 0;
+}
+
 /* ---- TIMESTAMP coercion ---- */
 static int test_timestamp_coercion(void) {
     char path[512]; carquet_test_temp_path(path, sizeof(path), "ext_tscoerce");
@@ -1799,6 +1918,8 @@ int main(void) {
     failures += test_float16_stats();
     failures += test_bitpacked_levels();
     failures += test_geospatial_stats();
+    failures += test_geospatial_crs_setter();
+    failures += test_geospatial_crs_setter_errors();
     failures += test_timestamp_coercion();
     failures += test_write_batch_size();
     failures += test_file_format_version();
