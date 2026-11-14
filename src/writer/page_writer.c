@@ -241,6 +241,9 @@ carquet_page_writer_t* carquet_page_writer_create(
     }
     if (writer->geo_enabled) {
         carquet_geo_stats_init(&writer->geo_stats);
+        /* See carquet_page_writer_reset_geo_stats(). */
+        writer->geo_stats.omit_bbox =
+            writer->logical_type.id == CARQUET_LOGICAL_GEOGRAPHY;
     }
     writer->encoding = encoding;
     writer->compression = compression;
@@ -274,6 +277,15 @@ void carquet_page_writer_destroy(carquet_page_writer_t* writer) {
 void carquet_page_writer_reset_geo_stats(carquet_page_writer_t* writer) {
     if (writer && writer->geo_enabled) {
         carquet_geo_stats_init(&writer->geo_stats);
+        /* A GEOGRAPHY edge between two vertices is a geodesic, which can
+         * reach beyond the vertices' latitude range (over a pole) or cross
+         * the antimeridian, so a box computed from the vertices can exclude
+         * part of a value. The specification gives no way to compute the
+         * spherical bound here, and a reader prunes row groups by the box,
+         * so a box that is too small makes it skip matching rows. Record the
+         * geometry types only; Arrow C++ also writes no box for GEOGRAPHY. */
+        writer->geo_stats.omit_bbox =
+            writer->logical_type.id == CARQUET_LOGICAL_GEOGRAPHY;
     }
 }
 

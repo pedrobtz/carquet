@@ -301,6 +301,53 @@ static int test_bitpacked_levels(void) {
     return 0;
 }
 
+/* ---- GeospatialStatistics: write WKB values, read the stats back ---- */
+static int write_geo_stats(const char* name, carquet_logical_type_id_t id,
+                           const carquet_byte_array_t* values, int64_t n,
+                           carquet_geospatial_statistics_t* out) {
+    char path[512]; carquet_test_temp_path(path, sizeof(path), name);
+    carquet_error_t err = CARQUET_ERROR_INIT;
+    carquet_schema_t* s = carquet_schema_create(&err);
+    carquet_logical_type_t lt = { .id = id };
+    if (!s || carquet_schema_add_column(s, "g", CARQUET_PHYSICAL_BYTE_ARRAY,
+            &lt, CARQUET_REPETITION_REQUIRED, 0, 0) != CARQUET_OK) {
+        if (s) carquet_schema_free(s);
+        return -1;
+    }
+    carquet_writer_options_t wo; carquet_writer_options_init(&wo);
+    carquet_writer_t* w = carquet_writer_create(path, s, &wo, &err);
+    int ok = w && carquet_writer_write_batch(w, 0, values, n, NULL, NULL) == CARQUET_OK;
+    if (w && carquet_writer_close(w) != CARQUET_OK) ok = 0;
+    carquet_schema_free(s);
+    if (!ok) { carquet_test_cleanup(path); return -1; }
+    carquet_reader_t* r = carquet_reader_open(path, NULL, &err);
+    memset(out, 0, sizeof(*out));
+    /* No GeospatialStatistics at all reads back as INVALID_METADATA. */
+    carquet_status_t st = r ? carquet_reader_geospatial_statistics(r, 0, 0, out)
+                            : CARQUET_ERROR_INVALID_ARGUMENT;
+    if (r) carquet_reader_close(r);
+    carquet_test_cleanup(path);
+    return st == CARQUET_OK ? 1 : (st == CARQUET_ERROR_INVALID_METADATA ? 0 : -1);
+}
+
+/* LINESTRING (0 60, 180 60): its geodesic passes over the north pole. */
+static int test_geography_omits_bbox(void) {
+    static uint8_t ls[41];
+    double xy[4] = { 0.0, 60.0, 180.0, 60.0 };
+    uint32_t type = 2, n = 2;
+    ls[0] = 1; memcpy(ls + 1, &type, 4); memcpy(ls + 5, &n, 4);
+    memcpy(ls + 9, xy, 32);
+    carquet_byte_array_t ba[1] = { { ls, 41 } };
+    carquet_geospatial_statistics_t gs;
+    int got = write_geo_stats("ext_geog", CARQUET_LOGICAL_GEOGRAPHY, ba, 1, &gs);
+    if (got != 1) TEST_FAIL("geography_omits_bbox", "no statistics");
+    if (gs.has_bbox) TEST_FAIL("geography_omits_bbox", "a vertex box was written");
+    if (gs.num_geometry_types != 1 || gs.geometry_types[0] != 2)
+        TEST_FAIL("geography_omits_bbox", "types");
+    TEST_PASS("geography_omits_bbox");
+    return 0;
+}
+
 /* ---- GEOMETRY GeospatialStatistics ---- */
 static void put_wkb_point(uint8_t* b, double x, double y) {
     b[0] = 1;                     /* little-endian */
@@ -1002,6 +1049,7 @@ int main(void) {
     failures += test_float16_stats();
     failures += test_bitpacked_levels();
     failures += test_geospatial_stats();
+    failures += test_geography_omits_bbox();
     failures += test_timestamp_coercion();
     failures += test_write_batch_size();
     failures += test_file_format_version();

@@ -23,6 +23,7 @@ static void add_type(parquet_geospatial_statistics_t* s, int32_t code) {
 static void add_coord(parquet_geospatial_statistics_t* s,
                       double x, double y, int has_z, double z,
                       int has_m, double m) {
+    if (s->omit_bbox) return;
     if (!isfinite(x) || !isfinite(y)) return;
     if (!s->valid) {
         s->xmin = s->xmax = x;
@@ -152,7 +153,7 @@ void carquet_geo_stats_add_wkb(parquet_geospatial_statistics_t* s,
 void carquet_geo_stats_merge(parquet_geospatial_statistics_t* dst,
                              const parquet_geospatial_statistics_t* src) {
     if (!src->valid && src->num_types == 0) return;
-    if (src->valid) {
+    if (src->valid && !dst->omit_bbox) {
         if (!dst->valid) {
             dst->xmin = src->xmin; dst->xmax = src->xmax;
             dst->ymin = src->ymin; dst->ymax = src->ymax;
