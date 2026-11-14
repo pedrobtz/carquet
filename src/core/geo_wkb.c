@@ -101,6 +101,7 @@ static void walk(parquet_geospatial_statistics_t* s, cur_t* c, int depth) {
     } else {                                  /* ISO WKB */
         base = (int)(raw % 1000u);
         unsigned d = raw / 1000u;
+        if (d > 3) { c->bad = 1; return; }    /* not an ISO dimension code */
         hz = (d == 1 || d == 3);
         hm = (d == 2 || d == 3);
     }
@@ -141,15 +142,39 @@ static void walk(parquet_geospatial_statistics_t* s, cur_t* c, int depth) {
     }
 }
 
+/* A value that is not WKB qio can walk leaves the chunk's extent and types
+ * unknown: a box or a type list that silently left it out would be a claim
+ * about values it does not cover. Unknown is what the specification's empty
+ * type list and absent box mean. */
+void carquet_geo_stats_merge(parquet_geospatial_statistics_t* dst,
+                             const parquet_geospatial_statistics_t* src);
+
+static void mark_invalid(parquet_geospatial_statistics_t* s) {
+    bool omit_bbox = s->omit_bbox;
+    carquet_geo_stats_init(s);
+    s->omit_bbox = omit_bbox;
+    s->invalid = true;
+}
+
 void carquet_geo_stats_add_wkb(parquet_geospatial_statistics_t* s,
                                const uint8_t* wkb, size_t len) {
-    if (!s || !wkb || len < 5) return;
+    if (!s || s->invalid) return;
+    if (!wkb || len < 5) { mark_invalid(s); return; }
+    /* Walk into a scratch accumulator, so a value that fails part-way
+     * contributes nothing rather than the coordinates before the failure. */
+    parquet_geospatial_statistics_t one;
+    carquet_geo_stats_init(&one);
+    one.omit_bbox = s->omit_bbox;
     cur_t c = { wkb, len, 0, 0 };
-    walk(s, &c, 0);
+    walk(&one, &c, 0);
+    if (c.bad) { mark_invalid(s); return; }
+    carquet_geo_stats_merge(s, &one);
 }
 
 void carquet_geo_stats_merge(parquet_geospatial_statistics_t* dst,
                              const parquet_geospatial_statistics_t* src) {
+    if (dst->invalid) return;
+    if (src->invalid) { mark_invalid(dst); return; }
     if (!src->has_x && !src->has_y && !src->has_z && !src->has_m &&
         src->num_types == 0) {
         return;

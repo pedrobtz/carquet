@@ -401,6 +401,37 @@ static int test_geo_nan_per_dimension(void) {
     return 0;
 }
 
+/* One value that is not walkable WKB (an ISO CircularString, type 8) makes
+ * the chunk's statistics unknown rather than a box that leaves it out. */
+static int test_geo_unparseable_value(void) {
+    static uint8_t p0[21], p1[21], curve[57], dim[29];
+    put_wkb_point(p0, 1.0, 2.0);
+    put_wkb_point(p1, 3.0, 4.0);
+    uint32_t type = 8, n = 3;
+    double xy[6] = { 100.0, 0.0, 150.0, 50.0, 200.0, 0.0 };
+    curve[0] = 1; memcpy(curve + 1, &type, 4); memcpy(curve + 5, &n, 4);
+    memcpy(curve + 9, xy, 48);
+    carquet_byte_array_t ba[3] = { { p0, 21 }, { curve, 57 }, { p1, 21 } };
+    carquet_geospatial_statistics_t gs;
+    if (write_geo_stats("ext_geocurve", CARQUET_LOGICAL_GEOMETRY, ba, 3, &gs) != 0)
+        TEST_FAIL("geo_unparseable_value", "statistics written for an unknown curve");
+    /* An ISO type code with dimension 4 is not WKB either. */
+    type = 4001; double xyz[3] = { 7.0, 8.0, 9.0 };
+    dim[0] = 1; memcpy(dim + 1, &type, 4); memcpy(dim + 5, xyz, 24);
+    carquet_byte_array_t bd[2] = { { p0, 21 }, { dim, 29 } };
+    if (write_geo_stats("ext_geodim", CARQUET_LOGICAL_GEOMETRY, bd, 2, &gs) != 0)
+        TEST_FAIL("geo_unparseable_value", "statistics written for dimension 4");
+    /* A truncated LineString contributes none of the points it has. */
+    static uint8_t ls[41]; type = 2; n = 3;
+    double two[4] = { 50.0, 50.0, 60.0, 60.0 };
+    ls[0] = 1; memcpy(ls + 1, &type, 4); memcpy(ls + 5, &n, 4); memcpy(ls + 9, two, 32);
+    carquet_byte_array_t bt[2] = { { p0, 21 }, { ls, 41 } };
+    if (write_geo_stats("ext_geotrunc", CARQUET_LOGICAL_GEOMETRY, bt, 2, &gs) != 0)
+        TEST_FAIL("geo_unparseable_value", "statistics written for a truncated value");
+    TEST_PASS("geo_unparseable_value");
+    return 0;
+}
+
 /* ---- GEOMETRY GeospatialStatistics ---- */
 
 static int test_geospatial_stats(void) {
@@ -1099,6 +1130,7 @@ int main(void) {
     failures += test_geography_omits_bbox();
     failures += test_geometry_types_top_level();
     failures += test_geo_nan_per_dimension();
+    failures += test_geo_unparseable_value();
     failures += test_timestamp_coercion();
     failures += test_write_batch_size();
     failures += test_file_format_version();
