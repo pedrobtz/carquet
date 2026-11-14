@@ -18,6 +18,7 @@
 #include "test_helpers.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define N 5000
 
@@ -371,6 +372,32 @@ static int test_geometry_types_top_level(void) {
     if (!gs.has_bbox || gs.xmin != 1.0 || gs.xmax != 3.0 || gs.ymin != 2.0 || gs.ymax != 4.0)
         TEST_FAIL("geometry_types_top_level", "bbox");
     TEST_PASS("geometry_types_top_level");
+    return 0;
+}
+
+/* POINT (1 NaN) and POINT (5 6): NaN is skipped per dimension, so X spans
+ * 1..5 and Y is 6. POINT (Inf 2) keeps its infinite X: only NaN is skipped. */
+static int test_geo_nan_per_dimension(void) {
+    static uint8_t p0[21], p1[21], p2[21];
+    put_wkb_point(p0, 1.0, NAN);
+    put_wkb_point(p1, 5.0, 6.0);
+    put_wkb_point(p2, INFINITY, 2.0);
+    carquet_byte_array_t ba[3] = { { p0, 21 }, { p1, 21 }, { p2, 21 } };
+    carquet_geospatial_statistics_t gs;
+    if (write_geo_stats("ext_geonan", CARQUET_LOGICAL_GEOMETRY, ba, 2, &gs) != 1 ||
+        !gs.has_bbox || gs.xmin != 1.0 || gs.xmax != 5.0 ||
+        gs.ymin != 6.0 || gs.ymax != 6.0)
+        TEST_FAIL("geo_nan_per_dimension", "NaN dropped the whole point");
+    if (write_geo_stats("ext_geoinf", CARQUET_LOGICAL_GEOMETRY, ba + 1, 2, &gs) != 1 ||
+        !gs.has_bbox || gs.xmin != 5.0 || !isinf(gs.xmax) ||
+        gs.ymin != 2.0 || gs.ymax != 6.0)
+        TEST_FAIL("geo_nan_per_dimension", "an infinite coordinate was dropped");
+    /* All NaN: types are known, but there is no box. */
+    put_wkb_point(p0, NAN, NAN);
+    if (write_geo_stats("ext_geoempty", CARQUET_LOGICAL_GEOMETRY, ba, 1, &gs) != 1 ||
+        gs.has_bbox || gs.num_geometry_types != 1)
+        TEST_FAIL("geo_nan_per_dimension", "empty point");
+    TEST_PASS("geo_nan_per_dimension");
     return 0;
 }
 
@@ -1071,6 +1098,7 @@ int main(void) {
     failures += test_geospatial_stats();
     failures += test_geography_omits_bbox();
     failures += test_geometry_types_top_level();
+    failures += test_geo_nan_per_dimension();
     failures += test_timestamp_coercion();
     failures += test_write_batch_size();
     failures += test_file_format_version();

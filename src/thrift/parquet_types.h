@@ -146,6 +146,10 @@ struct parquet_geospatial_statistics {
      * for GEOGRAPHY, whose edges are not the straight segments between
      * vertices, so the vertices' min/max is not a bound on the values. */
     bool omit_bbox;
+    /* Writer-side only: whether any X or Y value has been seen. The
+     * specification skips NaN per dimension, so the two fill separately;
+     * `valid` (a box exists) needs both. */
+    bool has_x, has_y;
 };
 typedef struct parquet_geospatial_statistics parquet_geospatial_statistics_t;
 

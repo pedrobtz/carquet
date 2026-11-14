@@ -20,29 +20,25 @@ static void add_type(parquet_geospatial_statistics_t* s, int32_t code) {
     }
 }
 
+/* The specification skips null and NaN values per dimension: POINT (1 NaN)
+ * contributes 1 to X and nothing to Y. A box exists once both X and Y have a
+ * value. Infinities are values, and are kept. */
+static void fold(double v, bool* seen, double* lo, double* hi) {
+    if (isnan(v)) return;
+    if (!*seen) { *lo = *hi = v; *seen = true; return; }
+    if (v < *lo) *lo = v;
+    if (v > *hi) *hi = v;
+}
+
 static void add_coord(parquet_geospatial_statistics_t* s,
                       double x, double y, int has_z, double z,
                       int has_m, double m) {
     if (s->omit_bbox) return;
-    if (!isfinite(x) || !isfinite(y)) return;
-    if (!s->valid) {
-        s->xmin = s->xmax = x;
-        s->ymin = s->ymax = y;
-        s->valid = true;
-    } else {
-        if (x < s->xmin) s->xmin = x;
-        if (x > s->xmax) s->xmax = x;
-        if (y < s->ymin) s->ymin = y;
-        if (y > s->ymax) s->ymax = y;
-    }
-    if (has_z && isfinite(z)) {
-        if (!s->has_z) { s->zmin = s->zmax = z; s->has_z = true; }
-        else { if (z < s->zmin) s->zmin = z; if (z > s->zmax) s->zmax = z; }
-    }
-    if (has_m && isfinite(m)) {
-        if (!s->has_m) { s->mmin = s->mmax = m; s->has_m = true; }
-        else { if (m < s->mmin) s->mmin = m; if (m > s->mmax) s->mmax = m; }
-    }
+    fold(x, &s->has_x, &s->xmin, &s->xmax);
+    fold(y, &s->has_y, &s->ymin, &s->ymax);
+    s->valid = s->has_x && s->has_y;
+    if (has_z) fold(z, &s->has_z, &s->zmin, &s->zmax);
+    if (has_m) fold(m, &s->has_m, &s->mmin, &s->mmax);
 }
 
 typedef struct {
@@ -154,28 +150,28 @@ void carquet_geo_stats_add_wkb(parquet_geospatial_statistics_t* s,
 
 void carquet_geo_stats_merge(parquet_geospatial_statistics_t* dst,
                              const parquet_geospatial_statistics_t* src) {
-    if (!src->valid && src->num_types == 0) return;
-    if (src->valid && !dst->omit_bbox) {
-        if (!dst->valid) {
-            dst->xmin = src->xmin; dst->xmax = src->xmax;
-            dst->ymin = src->ymin; dst->ymax = src->ymax;
-            dst->valid = true;
-        } else {
-            if (src->xmin < dst->xmin) dst->xmin = src->xmin;
-            if (src->xmax > dst->xmax) dst->xmax = src->xmax;
-            if (src->ymin < dst->ymin) dst->ymin = src->ymin;
-            if (src->ymax > dst->ymax) dst->ymax = src->ymax;
+    if (!src->has_x && !src->has_y && !src->has_z && !src->has_m &&
+        src->num_types == 0) {
+        return;
+    }
+    if (!dst->omit_bbox) {
+        if (src->has_x) {
+            fold(src->xmin, &dst->has_x, &dst->xmin, &dst->xmax);
+            fold(src->xmax, &dst->has_x, &dst->xmin, &dst->xmax);
         }
-    }
-    if (src->has_z) {
-        if (!dst->has_z) { dst->zmin = src->zmin; dst->zmax = src->zmax; dst->has_z = true; }
-        else { if (src->zmin < dst->zmin) dst->zmin = src->zmin;
-               if (src->zmax > dst->zmax) dst->zmax = src->zmax; }
-    }
-    if (src->has_m) {
-        if (!dst->has_m) { dst->mmin = src->mmin; dst->mmax = src->mmax; dst->has_m = true; }
-        else { if (src->mmin < dst->mmin) dst->mmin = src->mmin;
-               if (src->mmax > dst->mmax) dst->mmax = src->mmax; }
+        if (src->has_y) {
+            fold(src->ymin, &dst->has_y, &dst->ymin, &dst->ymax);
+            fold(src->ymax, &dst->has_y, &dst->ymin, &dst->ymax);
+        }
+        dst->valid = dst->has_x && dst->has_y;
+        if (src->has_z) {
+            fold(src->zmin, &dst->has_z, &dst->zmin, &dst->zmax);
+            fold(src->zmax, &dst->has_z, &dst->zmin, &dst->zmax);
+        }
+        if (src->has_m) {
+            fold(src->mmin, &dst->has_m, &dst->mmin, &dst->mmax);
+            fold(src->mmax, &dst->has_m, &dst->mmin, &dst->mmax);
+        }
     }
     for (int32_t i = 0; i < src->num_types; i++) add_type(dst, src->types[i]);
 }
