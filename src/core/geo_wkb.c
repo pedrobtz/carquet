@@ -110,7 +110,9 @@ static void walk(parquet_geospatial_statistics_t* s, cur_t* c, int depth) {
     }
     int ndim = 2 + hz + hm;
     int32_t iso = (int32_t)base + (hz ? 1000 : 0) + (hm ? 2000 : 0);
-    add_type(s, iso);
+    /* The types are those of the column's values, not of their parts: a
+     * MultiPolygon is a 6, not {6, 3}, and a collection is a 7. */
+    if (depth == 0) add_type(s, iso);
 
     switch (base) {
     case 1:  /* Point */

@@ -302,6 +302,13 @@ static int test_bitpacked_levels(void) {
 }
 
 /* ---- GeospatialStatistics: write WKB values, read the stats back ---- */
+static void put_wkb_point(uint8_t* b, double x, double y) {
+    b[0] = 1;                     /* little-endian */
+    b[1] = 1; b[2] = 0; b[3] = 0; b[4] = 0;   /* type 1 = Point XY */
+    memcpy(b + 5, &x, 8);
+    memcpy(b + 13, &y, 8);
+}
+
 static int write_geo_stats(const char* name, carquet_logical_type_id_t id,
                            const carquet_byte_array_t* values, int64_t n,
                            carquet_geospatial_statistics_t* out) {
@@ -348,13 +355,26 @@ static int test_geography_omits_bbox(void) {
     return 0;
 }
 
-/* ---- GEOMETRY GeospatialStatistics ---- */
-static void put_wkb_point(uint8_t* b, double x, double y) {
-    b[0] = 1;                     /* little-endian */
-    b[1] = 1; b[2] = 0; b[3] = 0; b[4] = 0;   /* type 1 = Point XY */
-    memcpy(b + 5, &x, 8);
-    memcpy(b + 13, &y, 8);
+/* MULTIPOINT ((1 2), (3 4)) records type 4 alone, not {4, 1}. */
+static int test_geometry_types_top_level(void) {
+    static uint8_t mp[51];
+    uint32_t type = 4, n = 2;
+    mp[0] = 1; memcpy(mp + 1, &type, 4); memcpy(mp + 5, &n, 4);
+    put_wkb_point(mp + 9, 1.0, 2.0);
+    put_wkb_point(mp + 30, 3.0, 4.0);
+    carquet_byte_array_t ba[1] = { { mp, 51 } };
+    carquet_geospatial_statistics_t gs;
+    if (write_geo_stats("ext_geotypes", CARQUET_LOGICAL_GEOMETRY, ba, 1, &gs) != 1)
+        TEST_FAIL("geometry_types_top_level", "no statistics");
+    if (gs.num_geometry_types != 1 || gs.geometry_types[0] != 4)
+        TEST_FAIL("geometry_types_top_level", "nested types were recorded");
+    if (!gs.has_bbox || gs.xmin != 1.0 || gs.xmax != 3.0 || gs.ymin != 2.0 || gs.ymax != 4.0)
+        TEST_FAIL("geometry_types_top_level", "bbox");
+    TEST_PASS("geometry_types_top_level");
+    return 0;
 }
+
+/* ---- GEOMETRY GeospatialStatistics ---- */
 
 static int test_geospatial_stats(void) {
     char path[512]; carquet_test_temp_path(path, sizeof(path), "ext_geo");
@@ -1050,6 +1070,7 @@ int main(void) {
     failures += test_bitpacked_levels();
     failures += test_geospatial_stats();
     failures += test_geography_omits_bbox();
+    failures += test_geometry_types_top_level();
     failures += test_timestamp_coercion();
     failures += test_write_batch_size();
     failures += test_file_format_version();
